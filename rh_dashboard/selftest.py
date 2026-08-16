@@ -1,0 +1,558 @@
+"""
+Internal verification suite. `rh-dashboard selftest`
+
+Same shape as `Production/Options/optionsuite/selftest.py`: a flat list of
+grouped checks, printed as it runs. No pytest — this file *is* the test suite,
+run in one shot with no per-test selection.
+
+The two groups that matter:
+
+  **Group 3** unit-tests the FIFO engine against hand-computed arithmetic,
+  including the two cases that motivated it: shares bought and never sold
+  (nothing realized, everything open) and a partial sale (half realized, half
+  still open).
+
+  **Group 7** asserts the reconciliation identity — net income, plus cash
+  parked in open positions, plus transfers, equals every dollar that moved. If
+  the income/holding split ever double-counts or drops a row, that check fails
+  even when every individual total still looks plausible.
+"""
+from __future__ import annotations
+
+import shutil
+import tempfile
+from datetime import date
+from pathlib import Path
+
+from .categorize import categorize, categorize_all
+from .dedupe import dedupe
+from .loader import LoadError, load_file, load_folder
+from .metrics import compute
+from .model import Category, Classified, Transaction
+from .pipeline import build_dashboard
+from .positions import compute_positions, normalise_contract
+
+ROOT = Path(__file__).resolve().parent.parent
+SAMPLE = ROOT / "sample_data"
+
+FAILS: list[str] = []
+CHECKS = 0
+
+
+def check(name, got, want, tol=0.005):
+    global CHECKS
+    CHECKS += 1
+    if isinstance(want, (int, float)) and isinstance(got, (int, float)) \
+            and not isinstance(want, bool) and not isinstance(got, bool):
+        ok = abs(got - want) <= tol
+    else:
+        ok = got == want
+    if not ok:
+        FAILS.append(f"{name}: got {got!r}, expected {want!r}")
+
+
+def group(n, title):
+    print(f"{n}. {title}")
+
+
+def _txn(**kw) -> Transaction:
+    base = dict(activity_date=date(2026, 1, 1), process_date=None, settle_date=None,
+                instrument="TEST", description="", trans_code="BUY", quantity=1.0,
+                price=1.0, amount=-1.0, source_file="fixture.csv", row_index=1)
+    base.update(kw)
+    return Transaction(**base)
+
+
+def _trade(day: int, code: str, qty: float, amount: float, instrument="TEST",
+           description="", category=Category.EQUITY) -> Classified:
+    """A Classified equity/option trade, for driving the FIFO engine directly."""
+    return Classified(
+        txn=_txn(activity_date=date(2026, 1, day), trans_code=code, quantity=qty,
+                 amount=amount, instrument=instrument, description=description,
+                 price=abs(amount / qty) if qty else None),
+        category=category, reason="fixture", fallback=False)
+
+
+# ---------------------------------------------------------------------------
+def _group_1_parsing():
+    group(1, "money and date parsing")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        f = tmp / "edge.csv"
+        f.write_text(
+            "Activity Date,Trans Code,Amount,Quantity,Price\n"
+            '06/01/2026,Buy,"($1,234.56)",2,$617.28\n'   # parens + comma = negative
+            "06/02/2026,Sell,$500.00,,\n"                 # plain positive
+            "06/03/2026,ACH,0,,\n"                         # zero
+            "not-a-date,ACH,5,,\n"                          # bad date -> skipped
+            "06/05/2026,GOLD,not-a-number,,\n"              # bad amount -> skipped
+        )
+        rows, errors = load_file(f)
+        check("parses (1,234.56) as -1234.56", rows[0].amount, -1234.56)
+        check("parses $500.00 as 500.0", rows[1].amount, 500.0)
+        check("parses 0 as 0.0", rows[2].amount, 0.0)
+        check("keeps the 3 good rows", len(rows), 3)
+        check("records 2 row errors", len(errors), 2)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _group_2_headers():
+    group(2, "header aliases and input validation")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        f = tmp / "aliases.csv"
+        f.write_text("Date,Symbol,Type,Net Amount\n07/01/2026,SPY,Buy,-100.00\n")
+        rows, _ = load_file(f)
+        check("alternate headers parse", len(rows), 1)
+        check("alternate headers map correctly", rows[0].amount, -100.0)
+
+        missing = tmp / "missing.csv"
+        missing.write_text("Foo,Bar\n1,2\n")
+        rows2, errors2 = load_file(missing)
+        check("file missing required columns yields no rows", len(rows2), 0)
+        check("file missing required columns is reported", len(errors2), 1)
+
+        for label, path in (("missing directory", tmp / "nope"),
+                             ("directory with no CSVs", tmp / "empty")):
+            if label.startswith("directory"):
+                path.mkdir()
+            raised = False
+            try:
+                load_folder(path)
+            except LoadError:
+                raised = True
+            check(f"load_folder on a {label} raises LoadError", raised, True)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _group_3_fifo():
+    group(3, "FIFO lot matching")
+
+    # --- bought and never sold: nothing realized, everything open ----------
+    r = compute_positions([_trade(2, "Buy", 100, -25000.0, "TSLA")])
+    check("open-only: no realized P&L", r.realized(Category.EQUITY), 0.0)
+    check("open-only: 100 shares still held", r.open_shares, 100.0)
+    check("open-only: cost basis is what was paid", r.open_equity_cost_basis, 25000.0)
+    check("open-only: one holding", len(r.equity_holdings), 1)
+    check("open-only: avg price per share", r.equity_holdings[0].avg_price, 250.0)
+
+    # --- partial sale: half realized, half still open ----------------------
+    r = compute_positions([
+        _trade(3, "Buy", 100, -18000.0, "AAPL"),     # 100 @ 180
+        _trade(5, "Sell", 50, 9500.0, "AAPL"),        # 50 @ 190
+    ])
+    check("partial: realized on the 50 sold only",
+          r.realized(Category.EQUITY), 500.0)          # (190-180) * 50
+    check("partial: 50 shares remain open", r.open_shares, 50.0)
+    check("partial: remaining cost basis at original price",
+          r.open_equity_cost_basis, 9000.0)            # 50 * 180
+    check("partial: avg cost unchanged by the sale",
+          r.equity_holdings[0].avg_price, 180.0)
+
+    # --- fully closed round trip ------------------------------------------
+    r = compute_positions([
+        _trade(5, "Buy", 10, -5500.0, "SPY"),
+        _trade(10, "Sell", 10, 5600.0, "SPY"),
+    ])
+    check("closed: full realized P&L", r.realized(Category.EQUITY), 100.0)
+    check("closed: nothing left open", r.open_shares, 0.0)
+    check("closed: no holding row", len(r.equity_holdings), 0)
+
+    # --- FIFO order: oldest lot consumed first ----------------------------
+    r = compute_positions([
+        _trade(1, "Buy", 50, -500.0, "FIFO"),         # 50 @ 10  (oldest)
+        _trade(2, "Buy", 50, -1000.0, "FIFO"),        # 50 @ 20
+        _trade(3, "Sell", 60, 1800.0, "FIFO"),        # 60 @ 30
+    ])
+    # 50 from the $10 lot -> (30-10)*50 = 1000; 10 from the $20 lot -> (30-20)*10 = 100
+    check("fifo: oldest lot matched first", r.realized(Category.EQUITY), 1100.0)
+    check("fifo: 40 shares left", r.open_shares, 40.0)
+    check("fifo: remainder priced at the newer lot",
+          r.open_equity_cost_basis, 800.0)             # 40 * 20
+    check("fifo: cash identity holds",
+          r.realized(Category.EQUITY) - r.open_equity_cost_basis, 300.0)  # -500-1000+1800
+
+    # --- short option round trip ------------------------------------------
+    contract = "AAPL 7/17/2026 Call $220.00"
+    r = compute_positions([
+        _trade(12, "STO", 1, 320.0, "AAPL", contract, Category.OPTIONS),
+        _trade(20, "BTC", 1, -110.0, "AAPL", contract, Category.OPTIONS),
+    ])
+    check("short option: realized credit minus debit",
+          r.realized(Category.OPTIONS), 210.0)
+    check("short option: nothing open", len(r.option_holdings), 0)
+
+    # --- option left open keeps its credit out of income -------------------
+    r = compute_positions([
+        _trade(12, "STO", 1, 320.0, "AAPL", contract, Category.OPTIONS)])
+    check("open short option: no realized P&L", r.realized(Category.OPTIONS), 0.0)
+    check("open short option: credit held as open", r.open_options_net_cash, 320.0)
+    check("open short option: flagged as a credit position",
+          r.option_holdings[0].is_credit_position, True)
+
+    # --- long option expiring worthless -----------------------------------
+    r = compute_positions([
+        _trade(12, "BTO", 1, -500.0, "NVDA", "NVDA 8/21/2026 Put $120.00", Category.OPTIONS),
+        _trade(30, "OEXP", 1, 0.0, "NVDA", "NVDA 8/21/2026 Put $120.00", Category.OPTIONS),
+    ])
+    check("expired long option: full debit realized as a loss",
+          r.realized(Category.OPTIONS), -500.0)
+    check("expired long option: nothing open", len(r.option_holdings), 0)
+
+    # --- different contracts must not match each other ---------------------
+    r = compute_positions([
+        _trade(1, "STO", 1, 300.0, "AAPL", "AAPL 7/17/2026 Call $220.00", Category.OPTIONS),
+        _trade(2, "STO", 1, 100.0, "AAPL", "AAPL 7/17/2026 Call $260.00", Category.OPTIONS),
+    ])
+    check("distinct strikes are distinct positions", len(r.option_holdings), 2)
+
+    # --- an expiration's Description is prefixed; it must still match ------
+    # Real data: STO "GOOG 8/14/2026 Call $390.00" closed by
+    # OEXP "Option Expiration for GOOG 8/14/2026 Call $390.00".
+    r = compute_positions([
+        _trade(1, "STO", 1, 320.0, "GOOG", "GOOG 8/14/2026 Call $390.00", Category.OPTIONS),
+        _trade(20, "OEXP", 1, 0.0, "GOOG",
+               "Option Expiration for GOOG 8/14/2026 Call $390.00", Category.OPTIONS),
+    ])
+    check("prefixed expiration closes the contract it names",
+          len(r.option_holdings), 0)
+    check("prefixed expiration realizes the credit", r.realized(Category.OPTIONS), 320.0)
+    check("normalise_contract strips the prefix",
+          normalise_contract("Option Expiration for AMD 8/5/2026 Call $530.00"),
+          "AMD 8/5/2026 Call $530.00")
+
+    # --- same-day buy and sell: opens must be processed first --------------
+    # Real data lists newest-first, so the sell appears above the buy that
+    # funded it; naive file ordering produced a phantom open position.
+    same_day = [
+        _trade(7, "Sell", 41.272514, 25629.49, "META"),
+        _trade(7, "Buy", 0.272514, -165.07, "META"),
+        _trade(7, "Buy", 41, -24834.93, "META"),
+    ]
+    r = compute_positions(same_day)
+    check("same-day round trip leaves nothing open", r.open_shares, 0.0)
+    check("same-day round trip realizes the whole move",
+          r.realized(Category.EQUITY), 25629.49 - 165.07 - 24834.93)
+    check("same-day round trip raises no oversold warning", len(r.warnings), 0)
+
+    # --- corporate action: basis carries, nothing is realized --------------
+    # CCIV 200 shares surrendered -> 200 LCID received, same day.
+    ca = [
+        _trade(1, "Buy", 200, -4810.00, "CCIV"),
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="SXCH",
+                        instrument="CCIV", quantity=200.0, quantity_suffix="S",
+                        amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="SXCH",
+                        instrument="LCID", quantity=200.0, amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+    ]
+    r = compute_positions(ca)
+    held = {h.instrument: h for h in r.equity_holdings}
+    check("surrendered ticker is closed out", "CCIV" in held, False)
+    check("received ticker is held", held["LCID"].quantity, 200.0)
+    check("cost basis carries across the exchange", held["LCID"].cost_basis, 4810.00)
+    check("a corporate action realizes nothing", r.realized(Category.EQUITY), 0.0)
+    check("total share count is unchanged in kind", r.open_shares, 200.0)
+
+    # a reverse split: 200 out, 40 in, same basis, same day
+    rs = [
+        _trade(1, "Buy", 200, -3200.00, "AKAN"),
+        Classified(_txn(activity_date=date(2026, 2, 10), trans_code="SPR",
+                        instrument="AKAN", quantity=200.0, quantity_suffix="S",
+                        amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+        Classified(_txn(activity_date=date(2026, 2, 10), trans_code="SPR",
+                        instrument="AKAN", quantity=40.0, amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+    ]
+    r = compute_positions(rs)
+    h = r.equity_holdings[0]
+    check("reverse split leaves the post-split share count", h.quantity, 40.0)
+    check("reverse split preserves total basis", h.cost_basis, 3200.00)
+    check("reverse split multiplies per-share cost", h.avg_price, 80.00)
+
+    # --- an option open past its own expiry is flagged ---------------------
+    r = compute_positions([
+        _trade(1, "STO", 1, 100.0, "XYZ", "XYZ 1/5/2026 Call $10.00", Category.OPTIONS),
+        Classified(_txn(activity_date=date(2026, 9, 1), trans_code="Sell",
+                        instrument="OTHER", quantity=1.0, amount=10.0),
+                   Category.EQUITY, "fixture", False),   # moves last activity forward
+    ])
+    check("contract left open past expiry is warned about",
+          any("no closing row" in w for w in r.warnings), True)
+
+    # --- selling more than held is flagged, not silently guessed -----------
+    r = compute_positions([
+        _trade(1, "Buy", 10, -1000.0, "GAP"),
+        _trade(2, "Sell", 25, 2750.0, "GAP"),
+    ])
+    check("oversold: warning raised", len(r.warnings) >= 1, True)
+    check("oversold: matched portion plus bare proceeds",
+          r.realized(Category.EQUITY), 1750.0)         # (110-100)*10 + 110*15
+    check("oversold: nothing left open", r.open_shares, 0.0)
+    # nothing open means realized must equal the raw cash sum (-1000 + 2750)
+    check("oversold: realized equals total cash when nothing is left open",
+          r.realized(Category.EQUITY), 1750.0)
+
+
+# Hand-derived from sample_data/*.csv. Recomputed independently of the code
+# under test: each figure below was worked out from the two CSVs by hand and
+# cross-checked against the arithmetic in the comments.
+#
+#   Equity realized  SPY (560-550)*10 = +100 ; AAPL (190-180)*50 = +500  -> +600
+#   Open equity      TSLA 100*250 + AAPL 50*180 + NVDA 20*135 = 36,700 (170 sh)
+#   Options realized STO +320 then BTC -110 on one contract              -> +210
+#   Div/Interest     CDIV 8.75 + MDIV 3.10                               -> +11.85
+#   Fees             AFEE                                                -> -2.50
+#   Margin           INT (negative)                                      -> -12.34
+#   Gold             GOLD -5.00 + GDBP -5.00                             -> -10.00
+#   Other            SLIP (no rule)                                      -> +1.15
+#   Net income       600+210+11.85-2.50-12.34-10.00+1.15                 -> +798.16
+#
+# A corporate action is also present: CCIV 100 bought for $2,405, then
+# surrendered for 100 LCID the following month. It carries NO Amount, so it
+# changes no income figure at all — it only moves the $2,405 of cost basis
+# from CCIV to LCID, which is exactly the property being asserted.
+#   Open equity      TSLA 25,000 + AAPL 9,000 + NVDA 2,700 + LCID 2,405
+#                                                          = 39,105 (270 sh)
+EXPECTED_INCOME = {
+    Category.EQUITY: 600.00,
+    Category.OPTIONS: 210.00,
+    Category.DIVIDENDS_INTEREST: 11.85,
+    Category.FEES: -2.50,
+    Category.MARGIN: -12.34,
+    Category.GOLD: -10.00,
+}
+EXPECTED_COUNTS = {
+    Category.EQUITY: 7, Category.OPTIONS: 2, Category.DIVIDENDS_INTEREST: 2,
+    Category.FEES: 1, Category.MARGIN: 1, Category.GOLD: 2,
+    Category.DEPOSITS: 2, Category.WITHDRAW: 1, Category.CORPORATE_ACTION: 2,
+}
+EXPECTED_NET_INCOME = 798.16
+EXPECTED_OPEN_SHARES = 270.0
+EXPECTED_OPEN_COST = 39105.00
+EXPECTED_TOTAL_CASH = -9806.84
+EXPECTED_DEPOSITS = 30500.00
+EXPECTED_WITHDRAW = -2000.00
+EXPECTED_OTHER = 1.15
+
+
+def _sample_metrics():
+    lr = load_folder(SAMPLE)
+    dd = dedupe(lr.transactions)
+    classified = categorize_all(dd.kept)
+    positions = compute_positions(classified)
+    return lr, dd, classified, positions, compute(classified, positions, dd.removed,
+                                                   lr.row_errors)
+
+
+def _group_4_sample_totals():
+    group(4, "sample_data reproduces hand-derived totals")
+    lr, dd, classified, positions, m = _sample_metrics()
+
+    check("no row errors in the sample CSVs", len(lr.row_errors), 0)
+    check("23 raw rows across both files", len(lr.transactions), 23)
+    check("2 cross-file duplicates removed", dd.removed, 2)
+    check("21 transactions kept", len(dd.kept), 21)
+    check("no lot-matching warnings on clean data", len(positions.warnings), 0)
+    # corporate action rows carry no Amount and must survive the loader
+    check("corporate action rows are loaded, not dropped as unparseable",
+          sum(1 for t in dd.kept if t.trans_code == "SXCH"), 2)
+    check("the outgoing leg keeps its S marker",
+          sum(1 for t in dd.kept if t.shares_removed), 1)
+
+    for cat, want in EXPECTED_INCOME.items():
+        check(f"{cat.value} income", m.income_of(cat), want)
+    for cat, want in EXPECTED_COUNTS.items():
+        check(f"{cat.value} transaction count", m.categories[cat].count, want)
+
+    check("other (unclassified) income", m.other_income, EXPECTED_OTHER)
+    check("net income", m.net_income, EXPECTED_NET_INCOME)
+    check("open shares held", m.open_shares, EXPECTED_OPEN_SHARES)
+    check("open equity cost basis", m.open_equity_cost_basis, EXPECTED_OPEN_COST)
+    check("no open options", m.open_options_net_cash, 0.0)
+    check("total cash movement", m.total_cash_movement, EXPECTED_TOTAL_CASH)
+    check("deposits", m.categories[Category.DEPOSITS].cash_total, EXPECTED_DEPOSITS)
+    check("withdraw", m.categories[Category.WITHDRAW].cash_total, EXPECTED_WITHDRAW)
+
+    # the specific per-ticker positions the sample was built to demonstrate
+    held = {h.instrument: h for h in positions.equity_holdings}
+    check("TSLA fully open (never sold)", held["TSLA"].quantity, 100.0)
+    check("TSLA cost basis", held["TSLA"].cost_basis, 25000.0)
+    check("AAPL half open after selling 50 of 100", held["AAPL"].quantity, 50.0)
+    check("AAPL remaining cost basis", held["AAPL"].cost_basis, 9000.0)
+    check("NVDA fully open", held["NVDA"].quantity, 20.0)
+    check("SPY fully closed, not in holdings", "SPY" in held, False)
+    # the corporate action: CCIV is gone, LCID holds its basis, income untouched
+    check("CCIV surrendered, no longer held", "CCIV" in held, False)
+    check("LCID received in exchange", held["LCID"].quantity, 100.0)
+    check("LCID inherited CCIV's cost basis", held["LCID"].cost_basis, 2405.00)
+    check("the exchange realized nothing", m.income_of(Category.EQUITY), 600.00)
+    check("corporate action moved no cash",
+          m.categories[Category.CORPORATE_ACTION].cash_total, 0.0)
+
+
+def _group_5_categorize():
+    group(5, "categorisation rules")
+    cases = [
+        (_txn(trans_code="BTO", description="SPY 9/18/2026 Call $800.00"), Category.OPTIONS, False),
+        (_txn(trans_code="STC", description="SPY 9/18/2026 Put $700.00"), Category.OPTIONS, False),
+        (_txn(trans_code="Buy", description="AAPL", amount=-500.0), Category.EQUITY, False),
+        (_txn(trans_code="Sell", description="AAPL", amount=500.0), Category.EQUITY, False),
+        (_txn(trans_code="Buy", description="AAPL 7/17/2026 Call $220.00"), Category.OPTIONS, False),
+        (_txn(trans_code="INT", description="Margin Interest", amount=-3.0), Category.MARGIN, False),
+        (_txn(trans_code="INT", description="Interest on cash", amount=2.0),
+         Category.DIVIDENDS_INTEREST, False),
+        (_txn(trans_code="AFEE", description="ADR Fee", amount=-2.5), Category.FEES, False),
+        (_txn(trans_code="afee", description="adr fee", amount=-1.0), Category.FEES, False),
+        (_txn(trans_code="GOLD", amount=-5.0), Category.GOLD, False),
+        (_txn(trans_code="GDBP", amount=-5.0), Category.GOLD, False),
+        (_txn(trans_code="CDIV", amount=8.75), Category.DIVIDENDS_INTEREST, False),
+        (_txn(trans_code="MDIV", amount=3.10), Category.DIVIDENDS_INTEREST, False),
+        (_txn(trans_code="QDIV", amount=1.0), Category.DIVIDENDS_INTEREST, False),
+        (_txn(trans_code="ACH", description="ACH Deposit", amount=1000.0), Category.DEPOSITS, False),
+        (_txn(trans_code="RTP", description="Instant Deposit", amount=500.0), Category.DEPOSITS, False),
+        (_txn(trans_code="ACH", description="ACH Withdrawal", amount=-500.0), Category.WITHDRAW, False),
+        (_txn(trans_code="RTP", description="Instant Withdrawal", amount=-50.0), Category.WITHDRAW, False),
+        (_txn(trans_code="WHATEVER", amount=50.0), Category.CREDITS, True),
+        (_txn(trans_code="WHATEVER", amount=-50.0), Category.DEBITS, True),
+    ]
+    for txn, want_cat, want_fallback in cases:
+        got = categorize(txn)
+        check(f"{txn.trans_code}/{txn.amount:g} -> {want_cat.value}",
+              got.category, want_cat)
+        check(f"{txn.trans_code}/{txn.amount:g} fallback flag", got.fallback, want_fallback)
+
+
+def _group_6_dedupe():
+    group(6, "dedupe semantics")
+    # filenames are alphabetical here because load_folder reads them sorted
+    a = _txn(source_file="2026-01.csv", row_index=2)
+    b = _txn(source_file="2026-02.csv", row_index=9)                 # identical to a
+    c = _txn(source_file="2026-02.csv", row_index=10, amount=-1.01)  # genuinely different
+    r = dedupe([a, b, c])
+    check("identical rows across files collapse", len(r.kept), 2)
+    check("the earlier file's copy is kept", r.kept[0].source_file, "2026-01.csv")
+    check("removed count", r.removed, 1)
+
+    # A row repeated WITHIN one file is two real transactions, not a duplicate.
+    # Collapsing these silently deleted a share purchase and left an option
+    # contract open forever on real data — see the module docstring.
+    twice = [_txn(source_file="only.csv", row_index=i) for i in (2, 3)]
+    r = dedupe(twice)
+    check("identical rows within one file are both kept", len(r.kept), 2)
+    check("nothing removed within a single file", r.removed, 0)
+
+    # Multiplicity survives an overlap: twice in each of two files is still two.
+    overlap = ([_txn(source_file="2026-01.csv", row_index=i) for i in (2, 3)]
+               + [_txn(source_file="2026-02.csv", row_index=i) for i in (5, 6)])
+    r = dedupe(overlap)
+    check("2-in-each-file collapses to 2, not 1 or 4", len(r.kept), 2)
+    check("both survivors come from one file",
+          len({t.source_file for t in r.kept}), 1)
+
+    # An uneven overlap keeps the larger count (the fuller export wins).
+    uneven = ([_txn(source_file="2026-01.csv", row_index=2)]
+              + [_txn(source_file="2026-02.csv", row_index=i) for i in (5, 6, 7)])
+    r = dedupe(uneven)
+    check("uneven overlap keeps the maximum multiplicity", len(r.kept), 3)
+
+
+def _group_7_reconciliation():
+    group(7, "reconciliation invariants")
+    _, _, classified, positions, m = _sample_metrics()
+
+    check("sample reconciles exactly", m.reconciles, True)
+    check("reconciliation error is zero", m.reconciliation_error, 0.0)
+
+    # the identity, spelled out independently of metrics.compute
+    rebuilt = (m.net_income - m.open_equity_cost_basis + m.open_options_net_cash
+               + m.categories[Category.DEPOSITS].cash_total
+               + m.categories[Category.WITHDRAW].cash_total)
+    check("net income + holdings + transfers == total cash",
+          rebuilt, m.total_cash_movement)
+
+    # raw cash across every category must equal the ledger sum, untouched by
+    # the income/holding split
+    check("category cash totals sum to total cash movement",
+          sum(s.cash_total for s in m.categories.values()), m.total_cash_movement)
+
+    # for lot-matched categories the gap between cash and income is exactly
+    # the money sitting in open positions
+    check("equity cash-vs-income gap equals open cost basis",
+          m.categories[Category.EQUITY].unrealized_gap, -m.open_equity_cost_basis)
+    check("options cash-vs-income gap equals open option cash",
+          m.categories[Category.OPTIONS].unrealized_gap, m.open_options_net_cash)
+    for cat in (Category.DIVIDENDS_INTEREST, Category.FEES, Category.MARGIN, Category.GOLD):
+        check(f"{cat.value} has no cash-vs-income gap",
+              m.categories[cat].unrealized_gap, 0.0)
+
+    # cumulative series must land on their totals
+    check("net income cumulative ends at net income",
+          m.net_income_cumulative[-1], m.net_income)
+    for cat in EXPECTED_INCOME:
+        check(f"{cat.value} cumulative ends at its income total",
+              m.categories[cat].income_cumulative[-1], m.income_of(cat))
+
+
+def _group_8_dashboard():
+    group(8, "end-to-end dashboard build")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        res = build_dashboard(input_dir=SAMPLE, output_dir=tmp, filename="dashboard.html")
+        check("build reports ok", res["ok"], True)
+        check("build reports reconciled", res["reconciles"], True)
+        check("net income surfaced in the result", res["net_income"], EXPECTED_NET_INCOME)
+        check("open shares surfaced in the result", res["open_shares"], EXPECTED_OPEN_SHARES)
+        check("four open equity positions listed (TSLA, AAPL, NVDA, LCID)",
+              len([p for p in res["open_positions"] if p["category"] == "Equity"]), 4)
+
+        out = Path(res["output"])
+        check("output file exists", out.exists(), True)
+        html = out.read_text(encoding="utf-8")
+        check("doctype present", html.strip().startswith("<!doctype html>"), True)
+        for label in ("Net income", "Open positions", "Equity", "Options",
+                      "Dividends/Interest", "Fees", "Margin", "Gold",
+                      "Deposits", "Withdraw", "Corporate action",
+                      "TSLA", "AAPL", "NVDA", "LCID"):
+            check(f"page mentions {label}", label in html, True)
+        check("page does not list the surrendered ticker as held",
+              ">CCIV<" in html.split('id="txn-table"')[0], False)
+        check("page states the net income figure", "$798.16" in html, True)
+        check("page states total shares held", "270 shares" in html, True)
+        check("page states open cost basis", "$39,105.00" in html, True)
+        check("page explains buying is not a loss",
+              "converts cash into an asset" in html, True)
+        check("no external script src", "<script src=" in html, False)
+        check("no external stylesheet", 'rel="stylesheet"' in html, False)
+        check("no http(s) references at all", "http://" in html or "https://" in html, False)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def run_selftest() -> bool:
+    _group_1_parsing()
+    _group_2_headers()
+    _group_3_fifo()
+    _group_4_sample_totals()
+    _group_5_categorize()
+    _group_6_dedupe()
+    _group_7_reconciliation()
+    _group_8_dashboard()
+
+    print()
+    if FAILS:
+        print(f"FAILED — {len(FAILS)} of {CHECKS} checks failed:")
+        for f in FAILS:
+            print(f"  - {f}")
+        return False
+    print(f"PASSED — {CHECKS} explicit assertions across 8 groups")
+    return True
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(0 if run_selftest() else 1)

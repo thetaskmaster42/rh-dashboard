@@ -1,0 +1,83 @@
+"""
+The public entry point.
+
+    from rh_dashboard import build_dashboard
+    result = build_dashboard(input_dir="input", output_dir="output")
+
+is the whole API. The CLI is a thin wrapper around it, same pattern as
+`optionsuite.generate_option_trades` in `Production/Options`.
+
+Pipeline order matters: positions must be matched *before* metrics, because
+Equity and Options reach net income as FIFO-realised P&L rather than as raw
+cash sums (see `positions.py` and `model.LOT_MATCHED_CATEGORIES`).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from .categorize import categorize_all
+from .dashboard import build_page
+from .dedupe import dedupe
+from .loader import LoadError, load_folder
+from .metrics import compute
+from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES
+from .positions import compute_positions
+
+
+def build_dashboard(input_dir: str | Path = "input",
+                    output_dir: str | Path = "output",
+                    filename: str = "dashboard.html") -> dict:
+    """
+    Read every CSV in `input_dir`, dedupe, categorise, match positions, and
+    write a self-contained HTML dashboard to `output_dir/filename`.
+
+    Raises `LoadError` if `input_dir` doesn't exist or has no CSVs — that's a
+    setup problem, not a data problem. Bad individual rows are never fatal:
+    they're skipped and reported in `row_errors`.
+    """
+    load_result = load_folder(input_dir)
+    dd = dedupe(load_result.transactions)
+    classified = categorize_all(dd.kept)
+    positions = compute_positions(classified)
+    metrics = compute(classified, positions, dd.removed, load_result.row_errors)
+
+    html = build_page(metrics, positions, classified, load_result.files_read,
+                      load_result.row_errors)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / filename
+    out_path.write_text(html, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "output": str(out_path),
+        "files_read": load_result.files_read,
+        "transactions_loaded": len(load_result.transactions),
+        "transactions_kept": len(dd.kept),
+        "duplicates_removed": dd.removed,
+        "row_errors": load_result.row_errors,
+        "fallback_count": metrics.fallback.count,
+        "fallback_codes": metrics.fallback.by_code,
+        "position_warnings": positions.warnings,
+        "date_range": metrics.date_range,
+        "income_by_category": {c.value: metrics.income_of(c) for c in INCOME_CATEGORIES},
+        "transfers_by_category": {c.value: metrics.categories[c].cash_total
+                                  for c in TRANSFER_CATEGORIES},
+        "other_income": metrics.other_income,
+        "net_income": metrics.net_income,
+        "open_shares": metrics.open_shares,
+        "open_equity_cost_basis": metrics.open_equity_cost_basis,
+        "open_options_net_cash": metrics.open_options_net_cash,
+        "open_positions": [
+            {"key": h.key, "instrument": h.instrument, "category": h.category.value,
+             "quantity": h.quantity, "avg_price": h.avg_price,
+             "cost_basis": h.cost_basis, "net_credit": h.net_credit}
+            for h in positions.holdings],
+        "total_cash_movement": metrics.total_cash_movement,
+        "reconciliation_error": metrics.reconciliation_error,
+        "reconciles": metrics.reconciles,
+    }
+
+
+__all__ = ["build_dashboard", "LoadError"]

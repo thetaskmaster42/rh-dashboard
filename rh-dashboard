@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""
+rh-dashboard — executable entry point.
+
+Runs from anywhere without installation: it puts its own directory on
+sys.path and hands off to rh_dashboard.cli.
+
+    ./rh-dashboard build
+    ./rh-dashboard build -i input -o output
+    ./rh-dashboard selftest
+
+To use it as a normal command, symlink it onto your PATH:
+    ln -s "$(pwd)/rh-dashboard" ~/.local/bin/rh-dashboard
+"""
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from rh_dashboard.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

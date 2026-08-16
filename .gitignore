@@ -1,0 +1,8 @@
+# Real account statements and the dashboards built from them are personal
+# financial data — unlike Production/Options, run output here is NOT
+# committed by default. sample_data/ is fictional and stays tracked.
+input/*.csv
+output/*.html
+
+__pycache__/
+*.pyc
