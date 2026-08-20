@@ -74,9 +74,18 @@ metrics asks `positions.py` for the realized figures.
    `Transaction`s. Header matching is alias-tolerant (`HEADER_ALIASES`); only
    Activity Date/Trans Code/Amount are required. A bad row or a file missing a
    required column is skipped and reported, never fatal to the run.
-2. **`dedupe.py`** collapses exact-duplicate rows (same everything except
-   source file) — Robinhood's monthly exports overlap in date range, so the
-   same row appears in two files verbatim.
+   **An empty Amount is meaningful, not malformed** — expirations, assignments,
+   mergers and splits move shares without moving cash, so those rows parse as
+   `$0.00`. Skipping them dropped 45 rows of a real export. Statement rows
+   arrive newest-first and Quantity may carry a trailing `S`; both matter
+   downstream.
+2. **`dedupe.py`** is **multiplicity-preserving**, not collapse-to-one. The
+   same row appears verbatim in two overlapping monthly exports (a duplicate),
+   but a row repeated *within one file* is two real identical transactions
+   (not a duplicate). So it counts occurrences per source file and keeps the
+   **maximum** across files. Collapsing to one deleted a real 100-share
+   purchase and left an option contract open forever — don't "simplify" this
+   into a `set()`.
 3. **`categorize.py`** sorts each transaction into one of eleven categories by
    trans code and description pattern (rules table in `README.md`). The rule
    set was checked against a real 556-row export; the non-obvious ones
@@ -99,6 +108,18 @@ metrics asks `positions.py` for the realized figures.
    calls at different strikes must not match); equity keys on ticker. Closing
    more than the statements account for is counted at full proceeds and
    **warned about**, never silently guessed.
+   Two ordering/semantic rules live here and are easy to break:
+   - **Opens are processed before closes on the same date** (`_phase`).
+     Statements carry a date but no time and export newest-first, so raw file
+     order lists a same-day sell above the buy that funded it — which produced
+     a phantom short plus a still-open position on same-day round trips.
+   - **Corporate actions (`MRGS`/`SXCH`/`SPR`) are basis-preserving transfers,
+     not taxable events.** They come as same-day pairs whose only direction
+     signal is the trailing `S` on Quantity (`Transaction.shares_removed`,
+     also part of `dedupe_key()`), since both legs have an empty Amount. The
+     surrendered lots' cost basis carries onto the shares received and the
+     exchange realizes nothing. Before this was handled, every SPAC and ticker
+     change stayed "open" forever because nothing ever closed the position.
 5. **`metrics.py`** builds the income statement: per-category `cash_total`
    (raw) *and* `income_total` (realized, for lot-matched categories), monthly
    cumulative series driven by realized events rather than raw cash, and
