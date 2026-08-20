@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rh-dashboard.fullname" . }}
+  labels:
+    {{- include "rh-dashboard.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # Recreate, not RollingUpdate: a ReadWriteOnce volume cannot attach to the
+    # new pod while the old one still holds it, so a rolling update deadlocks.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "rh-dashboard.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rh-dashboard.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: rh-dashboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["python", "-m", "rh_dashboard.cli"]
+          args:
+            - serve
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
+            - -i
+            - {{ printf "%s/input" .Values.persistence.mountPath | quote }}
+            - -o
+            - {{ printf "%s/output" .Values.persistence.mountPath | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: RH_DASHBOARD_MAX_UPLOAD
+              value: {{ .Values.maxUploadBytes | quote }}
+            {{- if .Values.auth.enabled }}
+            # The server turns auth on only when both are present, so these
+            # are all-or-nothing by design.
+            - name: RH_DASHBOARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rh-dashboard.authSecretName" . }}
+                  key: username
+            - name: RH_DASHBOARD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rh-dashboard.authSecretName" . }}
+                  key: password
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ printf "%s/input" .Values.persistence.mountPath | quote }}
+              subPath: input
+            - name: data
+              mountPath: {{ printf "%s/output" .Values.persistence.mountPath | quote }}
+              subPath: output
+            # readOnlyRootFilesystem is on, and uploads are staged through a
+            # temp file before the parser sees them, so /tmp must be writable.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+        {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "rh-dashboard.pvcName" . }}
+        {{- else }}
+          # No persistence: uploads are lost when the pod restarts.
+          emptyDir: {}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

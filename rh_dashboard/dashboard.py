@@ -635,7 +635,16 @@ def _transactions_table(classified) -> str:
 
 # --------------------------------------------------------------------------
 def build_page(m: Metrics, positions: PositionsResult, classified: list,
-               files_read: list[str], row_errors: list[str]) -> str:
+               files_read: list[str], row_errors: list[str],
+               interactive: bool = False) -> str:
+    """
+    Render the whole page.
+
+    `interactive` adds the statement-upload chrome, and is set only by
+    `server.py`. Left false — the CLI path — not one byte of the output
+    changes, so a dashboard built on the command line never ships a button
+    that posts to a server the file has no way to reach.
+    """
     # --- charts -----------------------------------------------------------
     line_series = [
         {"key": c.value, "color": category_color(c),
@@ -716,17 +725,22 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
             f"{s.count} {'transfer' if s.count == 1 else 'transfers'} · not income",
             swatch=category_color(c), neutral=True, inset=True))
 
+    extra_css = INTERACTIVE_CSS if interactive else ""
+    extra_js = INTERACTIVE_JS if interactive else ""
+    actions_html = _header_actions() if interactive else ""
+    dialog_html = _files_dialog() if interactive else ""
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Robinhood Portfolio Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{CSS}</style>
+<style>{CSS}{extra_css}</style>
 </head>
 <body>
 <div class="page">
-  <header>
+  <header>{actions_html}
     <h1>Robinhood Portfolio Dashboard</h1>
     <p class="meta">Generated {gen_ts} &middot; {len(files_read)} source file(s):
       {esc(", ".join(files_read))} &middot; {date_range}</p>
@@ -805,8 +819,251 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
       suitability assessment. Do not file taxes from these numbers.</li>
     </ul>
   </footer>
-</div>
-<script>{JS}</script>
+</div>{dialog_html}
+<script>{JS}{extra_js}</script>
 </body>
 </html>
+"""
+
+
+# --------------------------------------------------------------------------
+# Interactive chrome — only emitted when the page is served by `server.py`.
+#
+# A dashboard written by `./rh-dashboard build` is a file you can mail to
+# someone; it must not carry an upload button that posts into the void. So
+# every byte below is opt-in via `build_page(..., interactive=True)`, and the
+# CLI's output stays exactly what it was.
+INTERACTIVE_CSS = """
+.header-actions { float: right; display: flex; gap: 8px; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  height: 34px; padding: 0 13px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-1);
+  color: var(--text-primary); font-size: 12.5px; font-family: inherit;
+}
+.icon-btn:hover { background: var(--surface-2); }
+.icon-btn:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.icon-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+
+dialog.dlg {
+  width: min(620px, calc(100vw - 32px)); padding: 0; color: var(--text-primary);
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+}
+dialog.dlg::backdrop { background: rgba(0,0,0,0.45); }
+.dlg-body { padding: 20px 22px 22px; }
+.dlg-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dlg-head h2 { font-size: 15px; margin: 0 0 2px; }
+.dlg-sub { font-size: 12px; color: var(--text-secondary); margin: 0 0 14px; line-height: 1.5; }
+.dlg-close {
+  border: none; background: none; color: var(--text-muted); cursor: pointer;
+  font-size: 20px; line-height: 1; padding: 2px 6px; font-family: inherit;
+}
+.dlg-close:hover { color: var(--text-primary); }
+
+.drop-zone {
+  border: 1.5px dashed var(--baseline); border-radius: 10px; padding: 22px 16px;
+  text-align: center; font-size: 13px; color: var(--text-secondary);
+  background: var(--surface-2); transition: border-color .12s ease;
+}
+.drop-zone.dragging { border-color: var(--series-1); }
+.drop-zone .link {
+  border: none; background: none; padding: 0; cursor: pointer; font-family: inherit;
+  font-size: 13px; color: var(--series-1); text-decoration: underline;
+}
+
+.upload-log { margin: 14px 0 0; font-size: 12.5px; line-height: 1.55; }
+.upload-log li { margin: 5px 0; }
+.upload-log li.ok { color: var(--good-text); }
+.upload-log li.warn { color: var(--text-secondary); }
+.upload-log li.err { color: var(--bad-text); }
+.upload-log .why { color: var(--text-muted); }
+
+.file-list { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 16px; }
+.file-list th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .02em;
+  color: var(--text-muted); border-bottom: 1px solid var(--border); padding: 7px 8px;
+}
+.file-list td { padding: 7px 8px; border-bottom: 1px solid var(--grid); }
+.file-list td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.file-list .del {
+  border: none; background: none; cursor: pointer; color: var(--text-muted);
+  font-family: inherit; font-size: 12px; text-decoration: underline; padding: 0;
+}
+.file-list .del:hover { color: var(--bad-text); }
+"""
+
+_UPLOAD_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true">'
+                '<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke-linecap="round" '
+                'stroke-linejoin="round"/>'
+                '<path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" '
+                'stroke-linecap="round"/></svg>')
+
+
+def _header_actions() -> str:
+    return (
+        '\n    <div class="header-actions">'
+        f'<button type="button" class="icon-btn" id="open-files" '
+        f'aria-haspopup="dialog" title="Add or remove statement files">'
+        f'{_UPLOAD_ICON}<span>Statements</span></button>'
+        '</div>')
+
+
+def _files_dialog() -> str:
+    return """
+<dialog class="dlg" id="files-dialog" aria-labelledby="files-dialog-title">
+  <div class="dlg-body">
+    <div class="dlg-head">
+      <div>
+        <h2 id="files-dialog-title">Statement files</h2>
+      </div>
+      <button type="button" class="dlg-close" id="close-files" aria-label="Close">&times;</button>
+    </div>
+    <p class="dlg-sub">Every <code>*.csv</code> here is read, deduplicated and
+      rebuilt into the dashboard. Overlapping monthly exports are safe to add &mdash;
+      rows repeated across files collapse, rows repeated within one file do not.</p>
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" accept=".csv,text/csv" multiple hidden>
+      Drop statement CSVs here, or
+      <button type="button" class="link" id="browse-files">choose a file</button>
+    </div>
+    <ul class="upload-log" id="upload-log" hidden></ul>
+    <table class="file-list" id="file-list"><tbody></tbody></table>
+  </div>
+</dialog>"""
+
+
+INTERACTIVE_JS = """
+(function () {
+  var dialog = document.getElementById('files-dialog');
+  var log = document.getElementById('upload-log');
+  var input = document.getElementById('file-input');
+  var zone = document.getElementById('drop-zone');
+  var dirty = false;
+
+  document.getElementById('open-files').addEventListener('click', function () {
+    log.hidden = true;
+    log.replaceChildren();
+    refresh();
+    dialog.showModal();
+  });
+  document.getElementById('close-files').addEventListener('click', function () {
+    dialog.close();
+  });
+  // Reloading only on close keeps the dialog usable for several uploads in a
+  // row; the page behind it is stale until then, so never skip this.
+  dialog.addEventListener('close', function () { if (dirty) location.reload(); });
+
+  document.getElementById('browse-files').addEventListener('click', function () {
+    input.click();
+  });
+  input.addEventListener('change', function () { send(input.files); input.value = ''; });
+
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    zone.addEventListener(ev, function (e) {
+      e.preventDefault();
+      zone.classList.add('dragging');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    zone.addEventListener(ev, function (e) {
+      e.preventDefault();
+      zone.classList.remove('dragging');
+    });
+  });
+  zone.addEventListener('drop', function (e) { send(e.dataTransfer.files); });
+
+  function note(cls, text, why) {
+    var li = document.createElement('li');
+    li.className = cls;
+    li.textContent = text;
+    if (why) {
+      var span = document.createElement('span');
+      span.className = 'why';
+      span.textContent = ' — ' + why;
+      li.appendChild(span);
+    }
+    log.appendChild(li);
+    log.hidden = false;
+  }
+
+  function send(files) {
+    Array.prototype.forEach.call(files, function (file) {
+      var body = new FormData();
+      body.append('file', file, file.name);
+      fetch('api/upload', { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res.status === 'saved') {
+            note('ok', res.saved_as + ' added', res.detail);
+            dirty = true;
+          } else if (res.status === 'duplicate') {
+            note('warn', file.name, res.detail);
+          } else {
+            note('err', file.name + ' rejected', res.detail);
+          }
+          refresh();
+        })
+        .catch(function (err) { note('err', file.name + ' failed', String(err)); });
+    });
+  }
+
+  function refresh() {
+    fetch('api/files')
+      .then(function (r) { return r.json(); })
+      .then(function (res) { render(res.files || []); })
+      .catch(function () { /* dialog still works for uploading */ });
+  }
+
+  function render(files) {
+    var body = document.querySelector('#file-list tbody');
+    body.replaceChildren();
+    if (!files.length) {
+      var empty = document.createElement('tr');
+      var cell = document.createElement('td');
+      cell.colSpan = 3;
+      cell.textContent = 'No statement files yet.';
+      empty.appendChild(cell);
+      body.appendChild(empty);
+      return;
+    }
+    files.forEach(function (f) {
+      var tr = document.createElement('tr');
+      var name = document.createElement('td');
+      name.textContent = f.name;
+      var rows = document.createElement('td');
+      rows.className = 'num';
+      rows.textContent = f.rows + ' rows';
+      var act = document.createElement('td');
+      act.className = 'num';
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'del';
+      del.textContent = 'remove';
+      del.addEventListener('click', function () { remove(f.name); });
+      act.appendChild(del);
+      tr.appendChild(name);
+      tr.appendChild(rows);
+      tr.appendChild(act);
+      body.appendChild(tr);
+    });
+  }
+
+  function remove(name) {
+    fetch('api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res.status === 'deleted') {
+          note('ok', name + ' removed');
+          dirty = true;
+        } else {
+          note('err', name, res.detail);
+        }
+        refresh();
+      });
+  }
+})();
 """

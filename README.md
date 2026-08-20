@@ -17,10 +17,12 @@ offline, because the input is real account activity.
 ```bash
 ./rh-dashboard build              # reads input/*.csv, writes output/dashboard.html
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
-./rh-dashboard selftest           # 190 assertions across 8 groups
+./rh-dashboard serve              # same thing, served, with CSV upload
+./rh-dashboard selftest           # 235 assertions across 9 groups
 ```
 
-Then open `output/dashboard.html` in a browser.
+Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
+you used `serve`.
 
 ## The central idea: buying a stock is not a loss
 
@@ -84,8 +86,72 @@ rh-dashboard/
     ├── render.py              inline SVG chart builders (generic; no category logic)
     ├── dashboard.py           HTML assembly, theme tokens, category→colour
     ├── pipeline.py            build_dashboard() — the public API
+    ├── server.py              stdlib http.server front end: serve + upload
     └── selftest.py            internal verification suite
 ```
+
+## Running it as a service
+
+`./rh-dashboard build` needs a shell and a folder you can drop files into.
+`./rh-dashboard serve` needs neither, which is what makes it deployable:
+
+```bash
+./rh-dashboard serve --host 0.0.0.0 --port 8080 -i /data/input -o /data/output
+```
+
+It serves the same dashboard, with one addition — a **Statements** button in the
+top right that opens a dialog for adding and removing statement CSVs. An upload
+is accepted only if `loader.py` can actually parse it; anything else comes back
+with the reason instead of landing on disk to break the next build. Uploading a
+statement you already have is harmless and says so, since duplicate rows across
+overlapping exports are removed anyway.
+
+Set `RH_DASHBOARD_USER` and `RH_DASHBOARD_PASSWORD` to require HTTP Basic auth.
+Auth is off unless **both** are set; `/healthz` is always exempt, so a probe
+can't be locked out by a credential change.
+
+The page the CLI writes is untouched by any of this: `build` output is
+byte-for-byte what it was before the server existed, with no upload button in
+it, because a dashboard you mail to someone shouldn't carry controls that post
+into the void.
+
+This is `http.server`, not a hardened web server — a deliberate trade for the
+zero-dependency rule. Fine for one person on a private network; don't put it on
+the internet.
+
+### Kubernetes
+
+A `Dockerfile` (with no `pip install`, because there is nothing to install) and
+a Helm chart are in the repo:
+
+Tagging a commit `v1.2.3` publishes a multi-arch image and the packaged chart
+to GHCR, so the usual path is:
+
+```bash
+helm install rh oci://ghcr.io/thetaskmaster42/rh-dashboard-chart/rh-dashboard \
+  --version 1.2.3 \
+  --set image.repository=ghcr.io/thetaskmaster42/rh-dashboard
+```
+
+Or build it yourself:
+
+```bash
+docker build -t your-registry/rh-dashboard:1.0.0 .
+helm install rh ./chart \
+  --set image.repository=your-registry/rh-dashboard \
+  --set auth.enabled=true --set auth.username=me --set auth.password=... \
+  --set ingress.enabled=true --set ingress.hosts[0].host=rh.homelab.lan
+```
+
+One ReadWriteOnce PVC is mounted at `/data`, with `input/` and `output/` as
+subpaths. The deployment is fixed at one replica with a `Recreate` strategy:
+two pods can't share an RWO volume, and would race on the input folder during
+an upload if they could. The PVC carries `helm.sh/resource-policy: keep`, so
+uninstalling the release doesn't delete your statements.
+
+If uploads fail with a permission error, `podSecurityContext.fsGroup` is the
+value to check — the container runs as UID 1000 and a freshly provisioned
+volume is usually root-owned.
 
 ## Input format
 

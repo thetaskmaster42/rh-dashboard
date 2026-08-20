@@ -26,10 +26,15 @@ from .positions import compute_positions
 
 def build_dashboard(input_dir: str | Path = "input",
                     output_dir: str | Path = "output",
-                    filename: str = "dashboard.html") -> dict:
+                    filename: str = "dashboard.html",
+                    interactive: bool = False) -> dict:
     """
     Read every CSV in `input_dir`, dedupe, categorise, match positions, and
     write a self-contained HTML dashboard to `output_dir/filename`.
+
+    `interactive` adds the statement-upload chrome to the page; it is set by
+    `server.py` and never by the CLI, so a dashboard built on the command line
+    stays a plain file with no controls that need a server behind them.
 
     Raises `LoadError` if `input_dir` doesn't exist or has no CSVs — that's a
     setup problem, not a data problem. Bad individual rows are never fatal:
@@ -42,7 +47,7 @@ def build_dashboard(input_dir: str | Path = "input",
     metrics = compute(classified, positions, dd.removed, load_result.row_errors)
 
     html = build_page(metrics, positions, classified, load_result.files_read,
-                      load_result.row_errors)
+                      load_result.row_errors, interactive=interactive)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

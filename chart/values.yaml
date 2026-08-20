@@ -1,0 +1,103 @@
+image:
+  # No registry is assumed and there is no CI publishing this — build the
+  # Dockerfile at the repo root and point these at wherever you pushed it.
+  repository: rh-dashboard
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Deliberately fixed at one. The volume below is ReadWriteOnce, so a second
+# replica cannot attach it — and even with RWX, two pods would race on the
+# input folder during an upload and on the output file during a rebuild.
+# Scaling this is not a goal: it is one person's statement archive.
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: rh-dashboard.homelab.lan
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: rh-dashboard-tls
+    #   hosts:
+    #     - rh-dashboard.homelab.lan
+
+persistence:
+  # The whole point of the deployment: statements survive a pod restart.
+  # Disabling this gives you an emptyDir, i.e. uploads are lost on restart —
+  # useful for a quick look, never for real use.
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # One claim, mounted twice by subPath. Two directories on one volume beats
+  # two claims to keep in sync.
+  mountPath: /data
+
+auth:
+  # HTTP Basic, off by default. The page contains real account activity and
+  # upload writes to the volume, so turn this on for anything reachable
+  # beyond your own machine. The server enables auth only when BOTH the
+  # username and password env vars are set.
+  enabled: false
+  username: ""
+  password: ""
+  # Supply your own Secret instead, with keys `username` and `password`.
+  existingSecret: ""
+
+# Largest upload accepted, in bytes. A 556-row statement export is ~50 KB.
+maxUploadBytes: 10485760
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 48Mi
+  limits:
+    memory: 192Mi
+
+# fsGroup is the one value here you cannot omit. Without it the mounted
+# volume is owned by root, the container runs as UID 1000, and every upload
+# fails with EACCES — the most common first-deploy failure for this chart.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 20
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 10
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
