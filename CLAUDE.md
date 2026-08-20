@@ -14,12 +14,16 @@ unrelated options-research projects. Nothing here depends on them any more.
 
 ## Environment and tooling
 
-**Standard library only.** No dependencies, no virtualenv, no `pip install`.
-There is also no packaging, lint, format, or CI configuration — no
-`pyproject.toml`, `setup.py`, `Makefile`, or `.github/workflows`. Don't go
-looking: `./rh-dashboard selftest` is the entire quality gate. The package is
-imported off `sys.path` by the repo-relative `rh-dashboard` executable, never
-installed.
+**Standard library only.** No dependencies, no virtualenv, no `pip install` —
+including the HTTP server, which is `http.server` rather than Flask precisely
+to keep this true. There is also no packaging, lint, format, or CI
+configuration — no `pyproject.toml`, `setup.py`, `Makefile`, or
+`.github/workflows`. Don't go looking: `./rh-dashboard selftest` is the entire
+quality gate. The package is imported off `sys.path` by the repo-relative
+`rh-dashboard` executable, never installed.
+
+The `Dockerfile` and `chart/` exist for a homelab deployment where statements
+live on a PVC. The image has no pip layer for the same reason.
 
 The CLI resolves its default input/output paths from `__file__`, not the
 working directory, so it behaves the same whichever folder you invoke it from.
@@ -30,11 +34,13 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build                                 # reads input/*.csv, writes output/dashboard.html
 ./rh-dashboard build -i sample_data -o /tmp/preview  # try it on the bundled fictional fixtures first
 ./rh-dashboard build --filename jan.html             # rename the output file
-./rh-dashboard selftest                              # 190 assertions across 8 groups
+./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
+./rh-dashboard selftest                              # 235 assertions across 9 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 8 groups.
+by name; it always runs all 9 groups. Group 9 binds a real socket on port 0 and
+drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
 account data and is deliberately **not** committed. Only `sample_data/`
@@ -48,6 +54,8 @@ statement rows into tests, fixtures, or commit messages.
 |---|---|
 | `rh_dashboard/**` | `./rh-dashboard selftest` |
 | `sample_data/*.csv` | re-derive the expected constants in `selftest.py` **by hand**, then `./rh-dashboard selftest` |
+| `dashboard.py` | `./rh-dashboard selftest`, and confirm `build` output didn't move: diff a fresh `build -i sample_data` against the previous one, ignoring the `Generated` timestamp |
+| `chart/**` | `helm lint ./chart && helm template rh ./chart` |
 
 ## Architecture
 
@@ -143,6 +151,17 @@ metrics asks `positions.py` for the realized figures.
 7. **`pipeline.build_dashboard`** is the public API tying the above together;
    **`cli.py`** is the argparse wrapper; `rh-dashboard` (repo-relative
    executable) puts its own directory on `sys.path` and calls `cli.main`.
+8. **`server.py`** is an optional front end, not part of the pipeline: an
+   `http.server` handler serving `GET /` plus a small JSON API for uploading
+   and deleting CSVs on the volume. Two invariants worth keeping:
+   **`build_page(interactive=False)` output must stay byte-identical** — the
+   upload chrome lives in `INTERACTIVE_CSS`/`INTERACTIVE_JS`/`_header_actions`/
+   `_files_dialog`, injected only when the server asks, so a dashboard built on
+   the CLI never carries a button that posts nowhere. And **an upload is
+   validated by running `loader.load_file` over it**, not by sniffing its name
+   or header — same "skip loudly" rule as everywhere else, with the parser's
+   own error text returned to the user. Uploads are safe to repeat because
+   `dedupe.py` keeps the per-file maximum multiplicity.
 
 `selftest.py` group 3 unit-tests the FIFO engine (open-only, partial sale, FIFO
 ordering across lots, short options, expiry, oversell) and group 7 asserts the

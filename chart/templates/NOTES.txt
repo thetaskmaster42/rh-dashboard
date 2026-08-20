@@ -1,0 +1,35 @@
+rh-dashboard is deployed.
+
+{{- if .Values.ingress.enabled }}
+
+  Reach it at:
+{{- range .Values.ingress.hosts }}
+    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+  No ingress is enabled. Forward the port to look at it:
+
+    kubectl --namespace {{ .Release.Namespace }} port-forward \
+      svc/{{ include "rh-dashboard.fullname" . }} 8080:{{ .Values.service.port }}
+
+  then open http://127.0.0.1:8080
+{{- end }}
+
+{{- if not .Values.auth.enabled }}
+
+  WARNING: authentication is off. Anyone who can reach this service can read
+  your account activity and upload files to the volume. Set auth.enabled=true
+  with auth.username/auth.password for anything beyond your own machine.
+{{- end }}
+
+{{- if not .Values.persistence.enabled }}
+
+  WARNING: persistence is off — uploaded statements are lost when the pod
+  restarts. Set persistence.enabled=true for real use.
+{{- end }}
+
+  The dashboard starts empty. Use the "Statements" button at the top right to
+  upload Robinhood statement CSV exports; the page rebuilds as soon as a file
+  lands. Monthly exports overlap in date range and are deduplicated for you,
+  so upload all of them.

@@ -29,6 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--filename", default="dashboard.html",
                    help="output file name (default: dashboard.html)")
 
+    v = sub.add_parser("serve", help="serve the dashboard and accept CSV uploads")
+    v.add_argument("--host", default="127.0.0.1",
+                   help="bind address (default: 127.0.0.1; use 0.0.0.0 in a container)")
+    v.add_argument("--port", type=int, default=8080, help="port (default: 8080)")
+    v.add_argument("-i", "--input", type=Path, default=DEFAULT_INPUT,
+                   help=f"folder of statement CSVs (default: {DEFAULT_INPUT})")
+    v.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT,
+                   help=f"output folder (default: {DEFAULT_OUTPUT})")
+
     sub.add_parser("selftest", help="run the internal verification suite")
 
     return p
@@ -42,10 +51,18 @@ def main(argv=None) -> int:
 
     if args.command == "build":
         return _cmd_build(args)
+    if args.command == "serve":
+        return _cmd_serve(args)
     if args.command == "selftest":
         from .selftest import run_selftest
         return 0 if run_selftest() else 1
     return 1
+
+
+def _cmd_serve(args) -> int:
+    from .server import ServerConfig, serve
+    cfg = ServerConfig.from_env(args.input, args.output)
+    return serve(args.host, args.port, cfg)
 
 
 def _cmd_build(args) -> int:

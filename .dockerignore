@@ -1,0 +1,13 @@
+# Real account data must never reach an image layer.
+input/*.csv
+output/*.html
+
+.git
+.github
+docs
+chart
+__pycache__
+**/__pycache__
+*.pyc
+Dockerfile
+.dockerignore

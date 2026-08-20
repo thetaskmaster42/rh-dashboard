@@ -19,8 +19,13 @@ The two groups that matter:
 """
 from __future__ import annotations
 
+import base64
+import json
 import shutil
 import tempfile
+import threading
+import urllib.error
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -37,6 +42,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
+GROUPS = 9
 
 
 def check(name, got, want, tol=0.005):
@@ -533,6 +539,177 @@ def _group_8_dashboard():
         shutil.rmtree(tmp)
 
 
+# ---------------------------------------------------------------------------
+# Group 9 drives the real handler over a real socket rather than calling the
+# route methods directly: the things most likely to break here — auth, the
+# body-size cap, multipart parsing, path traversal — all live in the HTTP
+# layer, and a unit test that skips it would prove none of them.
+def _serve_temp():
+    """Start a throwaway server on a free port. Returns (base_url, cfg, stop)."""
+    from http.server import ThreadingHTTPServer
+
+    from .server import ServerConfig, make_handler
+
+    tmp = Path(tempfile.mkdtemp())
+    cfg = ServerConfig(input_dir=tmp / "input", output_dir=tmp / "output",
+                       username="tester", password="s3cret", max_upload=64 * 1024)
+    cfg.input_dir.mkdir(parents=True)
+    cfg.output_dir.mkdir(parents=True)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cfg))
+    # Quiet: the suite prints its own output and per-request logging would bury it.
+    httpd.RequestHandlerClass.log_message = lambda *a, **k: None
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def stop():
+        httpd.shutdown()
+        httpd.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    return f"http://127.0.0.1:{httpd.server_address[1]}", cfg, stop
+
+
+_AUTH = {"Authorization": "Basic " + base64.b64encode(b"tester:s3cret").decode()}
+
+
+def _request(url, data=None, headers=None, method=None):
+    """Returns (status, body_bytes); an HTTP error status is a result here,
+    not an exception."""
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _upload(base, filename, payload, headers=None):
+    body = (b'--B\r\nContent-Disposition: form-data; name="file"; filename="'
+            + filename.encode() + b'"\r\nContent-Type: text/csv\r\n\r\n'
+            + payload + b"\r\n--B--\r\n")
+    h = dict(headers if headers is not None else _AUTH)
+    h["Content-Type"] = "multipart/form-data; boundary=B"
+    status, raw = _request(base + "/api/upload", body, h, "POST")
+    return status, json.loads(raw)
+
+
+def _group_9_server():
+    group(9, "http server, upload and file management")
+    from .server import safe_name
+
+    # filename sanitising, before any socket is involved
+    check("traversal is reduced to a basename", safe_name("../../etc/evil.csv"), "evil.csv")
+    check("backslash traversal is reduced too",
+          safe_name(r"..\..\windows\evil.csv"), "evil.csv")
+    check("a non-csv name is refused", safe_name("notes.txt"), None)
+    check("a bare dotfile name is refused", safe_name(".csv"), None)
+    check("an ordinary name survives intact",
+          safe_name("2026-06-statement.csv"), "2026-06-statement.csv")
+
+    base, cfg, stop = _serve_temp()
+    try:
+        csv_bytes = (SAMPLE / "2026-06-statement.csv").read_bytes()
+
+        # health and auth
+        status, raw = _request(base + "/healthz")
+        check("healthz answers without credentials", status, 200)
+        check("healthz reports ok", json.loads(raw)["status"], "ok")
+        check("the dashboard demands credentials", _request(base + "/")[0], 401)
+        bad = {"Authorization": "Basic " + base64.b64encode(b"tester:wrong").decode()}
+        check("a wrong password is refused", _request(base + "/", headers=bad)[0], 401)
+        check("a wrong user is refused", _request(
+            base + "/",
+            headers={"Authorization": "Basic "
+                     + base64.b64encode(b"nobody:s3cret").decode()})[0], 401)
+        check("a garbled auth header is refused",
+              _request(base + "/", headers={"Authorization": "Basic !!!"})[0], 401)
+
+        # an empty volume is a normal starting state, not a 500
+        status, body = _request(base + "/", headers=_AUTH)
+        page = body.decode("utf-8")
+        check("an empty input folder still serves a page", status, 200)
+        check("the empty page says there is nothing yet", "Nothing to show yet" in page, True)
+        check("the empty page still offers the upload dialog", 'id="files-dialog"' in page, True)
+
+        # rejections, each with a reason the dialog can show
+        status, res = _upload(base, "notes.txt", csv_bytes)
+        check("a non-csv upload is rejected", status, 400)
+        check("the non-csv rejection names the reason",
+              "*.csv" in res["detail"], True)
+        check("an empty upload is rejected", _upload(base, "empty.csv", b"")[0], 400)
+        check("an upload with no transactions is rejected",
+              _upload(base, "none.csv", b"Activity Date,Trans Code,Amount\n")[0], 400)
+        status, res = _upload(base, "cols.csv", b"Activity Date,Trans Code\n06/02/2026,Buy\n")
+        check("a csv missing a required column is rejected", status, 400)
+        check("the rejection names the missing column", "amount" in res["detail"], True)
+        check("an oversized body is rejected",
+              _upload(base, "big.csv", b"x" * (65 * 1024))[0], 413)
+        check("an upload without credentials is refused",
+              _upload(base, "sneak.csv", csv_bytes, headers={})[0], 401)
+        check("nothing rejected was written to the volume",
+              list(cfg.input_dir.glob("*.csv")), [])
+
+        # the happy path
+        status, res = _upload(base, "2026-06-statement.csv", csv_bytes)
+        check("a valid statement is accepted", status, 200)
+        check("the accepted upload reports its name", res["saved_as"],
+              "2026-06-statement.csv")
+        check("the accepted upload reports its row count", res["rows"], 11)
+        check("the file landed in the input folder",
+              (cfg.input_dir / "2026-06-statement.csv").is_file(), True)
+
+        # re-uploading the same export is how you find out it's already there
+        status, res = _upload(base, "2026-06-statement.csv", csv_bytes)
+        check("an identical re-upload is a no-op", res["status"], "duplicate")
+        check("an identical re-upload writes no second file",
+              len(list(cfg.input_dir.glob("*.csv"))), 1)
+
+        # different bytes under the same name are a different statement
+        status, res = _upload(base, "2026-06-statement.csv", csv_bytes + b"\n")
+        check("a changed file under the same name is kept separately",
+              res["saved_as"], "2026-06-statement-2.csv")
+        check("the original was not overwritten",
+              (cfg.input_dir / "2026-06-statement.csv").read_bytes(), csv_bytes)
+
+        # traversal survives the whole round trip, not just safe_name()
+        status, res = _upload(base, "../../evil.csv", csv_bytes)
+        check("a traversing filename is written inside the input folder",
+              (cfg.input_dir / "evil.csv").is_file(), True)
+        check("and nowhere above it", (cfg.input_dir.parent / "evil.csv").exists(), False)
+
+        # listing
+        status, raw = _request(base + "/api/files", headers=_AUTH)
+        names = [f["name"] for f in json.loads(raw)["files"]]
+        check("the file listing shows every csv", len(names), 3)
+        check("the listing reports parsed row counts",
+              json.loads(raw)["files"][0]["rows"] > 0, True)
+
+        # the built page, and the cache noticing the volume changed
+        status, body = _request(base + "/", headers=_AUTH)
+        page = body.decode("utf-8")
+        check("the dashboard builds from the uploaded file", status, 200)
+        check("the built page reports net income", "Net income" in page, True)
+        check("the served page carries the upload control", 'id="open-files"' in page, True)
+        check("the served page is still self-contained", "<script src=" in page, False)
+        check("the served page still links no stylesheet", 'rel="stylesheet"' in page, False)
+
+        # delete
+        hdr = dict(_AUTH)
+        hdr["Content-Type"] = "application/json"
+        status, raw = _request(base + "/api/files/delete", b'{"name": "evil.csv"}',
+                               hdr, "POST")
+        check("deleting a file succeeds", json.loads(raw)["status"], "deleted")
+        check("the file is gone", (cfg.input_dir / "evil.csv").exists(), False)
+        check("deleting a missing file 404s",
+              _request(base + "/api/files/delete", b'{"name": "gone.csv"}',
+                       hdr, "POST")[0], 404)
+        check("deleting a traversing path is refused",
+              _request(base + "/api/files/delete", b'{"name": "../../../etc/passwd"}',
+                       hdr, "POST")[0], 400)
+        check("an unknown route 404s", _request(base + "/nope", headers=_AUTH)[0], 404)
+    finally:
+        stop()
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -542,6 +719,7 @@ def run_selftest() -> bool:
     _group_6_dedupe()
     _group_7_reconciliation()
     _group_8_dashboard()
+    _group_9_server()
 
     print()
     if FAILS:
@@ -549,7 +727,7 @@ def run_selftest() -> bool:
         for f in FAILS:
             print(f"  - {f}")
         return False
-    print(f"PASSED — {CHECKS} explicit assertions across 8 groups")
+    print(f"PASSED — {CHECKS} explicit assertions across {GROUPS} groups")
     return True
 
 
