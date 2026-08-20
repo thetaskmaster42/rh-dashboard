@@ -107,8 +107,15 @@ statement you already have is harmless and says so, since duplicate rows across
 overlapping exports are removed anyway.
 
 Set `RH_DASHBOARD_USER` and `RH_DASHBOARD_PASSWORD` to require HTTP Basic auth.
-Auth is off unless **both** are set; `/healthz` is always exempt, so a probe
-can't be locked out by a credential change.
+Auth is off unless **both** are set — a username with no password is not
+"nearly protected", it is open. `/healthz` is always exempt, so a probe can't
+be locked out by a credential change.
+
+Set `RH_DASHBOARD_AUTH_REQUIRED=true` to say you *meant* to have auth: missing
+or empty credentials then make the server refuse to start instead of coming up
+unauthenticated. The Helm chart sets it automatically whenever `auth.enabled`,
+so a Secret with a renamed key or an empty value crash-loops visibly rather
+than quietly serving your account statement to anyone who can reach it.
 
 The page the CLI writes is untouched by any of this: `build` output is
 byte-for-byte what it was before the server existed, with no upload button in
@@ -152,6 +159,18 @@ uninstalling the release doesn't delete your statements.
 If uploads fail with a permission error, `podSecurityContext.fsGroup` is the
 value to check — the container runs as UID 1000 and a freshly provisioned
 volume is usually root-owned.
+
+If the pull fails with `failed to fetch anonymous token: 401 Unauthorized`, the
+GHCR package is private. **Package visibility is fixed at first publish and is
+independent of the repository's** — making the repo public later does not
+bring existing packages with it, and there is no REST endpoint for it. Either
+flip it once under *Package settings → Change visibility*, or keep it private
+and set `imagePullSecrets`.
+
+Credentials are best supplied as a Secret you manage yourself — a
+SOPS-encrypted one, for example — via `auth.existingSecret`, with
+`auth.usernameKey`/`auth.passwordKey` naming its keys. The chart then creates
+no Secret and no password passes through Helm values.
 
 ## Input format
 

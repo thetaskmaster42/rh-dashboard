@@ -1,9 +1,22 @@
 image:
-  # No registry is assumed and there is no CI publishing this — build the
-  # Dockerfile at the repo root and point these at wherever you pushed it.
-  repository: rh-dashboard
+  # Published by .github/workflows/release.yml on a v* tag. The default is a
+  # real, resolvable reference on purpose: a chart whose default image cannot
+  # be pulled fails at the last step of a deploy, which is the worst place to
+  # find out.
+  repository: ghcr.io/thetaskmaster42/rh-dashboard
   tag: ""            # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
+
+# GHCR packages are private until made public, and package visibility is set
+# at first publish — a repo that later becomes public does NOT bring its
+# existing packages with it. If the pull fails with
+#   failed to fetch anonymous token: 401 Unauthorized
+# the package is private and this is the setting you need, e.g.
+#   kubectl create secret docker-registry ghcr \
+#     --docker-server=ghcr.io --docker-username=<user> \
+#     --docker-password=<PAT with read:packages>
+# then imagePullSecrets: [{name: ghcr}]. In a SOPS/GitOps setup, commit that
+# Secret encrypted and reference it here by name.
 imagePullSecrets: []
 
 nameOverride: ""
@@ -51,12 +64,24 @@ auth:
   # HTTP Basic, off by default. The page contains real account activity and
   # upload writes to the volume, so turn this on for anything reachable
   # beyond your own machine. The server enables auth only when BOTH the
-  # username and password env vars are set.
+  # username and password env vars are set — half-configured auth that
+  # silently allows everything would be worse than none.
   enabled: false
+
+  # Preferred in a GitOps repo: point at a Secret you manage yourself, e.g.
+  # one committed SOPS-encrypted and decrypted at apply time. The chart then
+  # creates no Secret of its own and no credential passes through Helm values.
+  existingSecret: ""
+  # Key names inside that Secret. SOPS-managed secrets often use their own
+  # conventions, so don't assume username/password.
+  usernameKey: username
+  passwordKey: password
+
+  # Only used when existingSecret is empty. Fine for `helm install --set` on a
+  # laptop; in a repo these end up in plaintext values and in Helm's stored
+  # release, so prefer existingSecret there.
   username: ""
   password: ""
-  # Supply your own Secret instead, with keys `username` and `password`.
-  existingSecret: ""
 
 # Largest upload accepted, in bytes. A 556-row statement export is ~50 KB.
 maxUploadBytes: 10485760
