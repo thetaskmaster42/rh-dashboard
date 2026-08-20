@@ -18,16 +18,32 @@ unrelated options-research projects. Nothing here depends on them any more.
 including the HTTP server, which is `http.server` rather than Flask precisely
 to keep this true. There is also no packaging, lint or format
 configuration — no `pyproject.toml`, `setup.py`, or `Makefile`. Don't go
-looking: `./rh-dashboard selftest` is the entire quality gate, and CI runs
-exactly that plus `helm lint`/`helm template` and a container build. The package is imported off `sys.path` by the repo-relative
-`rh-dashboard` executable, never installed.
+looking: `./rh-dashboard selftest` is the entire quality gate. The package is
+imported off `sys.path` by the repo-relative `rh-dashboard` executable, never
+installed.
 
 The `Dockerfile` and `chart/` exist for a homelab deployment where statements
 live on a PVC. The image has no pip layer for the same reason.
-`.github/workflows/ci.yml` runs the suite on 3.11-3.13 and **fails if a
-`requirements.txt` or `pyproject.toml` ever appears** — that check is the
-zero-dependency rule made enforceable. `release.yml` publishes a multi-arch
-image and the packaged chart to GHCR on a `v*` tag, never from `main`.
+`.github/workflows/ci.yml` has four jobs, and each one guards a rule stated
+elsewhere in this file:
+
+- **selftest** on 3.11-3.13. **Fails if a `requirements.txt` or
+  `pyproject.toml` ever appears** — the zero-dependency rule made enforceable.
+  Then builds the sample page and greps it: no `<script src=`, no
+  `rel="stylesheet"`, and **no `https?://` anywhere in the output HTML at
+  all**. That last one is the easy trap — a documentation link, a source URL,
+  even one inside an HTML comment, fails the build. Keep URLs out of
+  `dashboard.py`'s emitted markup.
+- **CLI page is byte-stable** (PRs only): rebuilds `sample_data` at the merge
+  base and at HEAD and diffs, ignoring the `Generated` timestamp. It *warns*
+  rather than fails — read the annotation, don't assume green means unchanged.
+- **helm**: `helm lint` plus `helm template` over every conditional path, and
+  asserts `--set auth.enabled=true` with no credentials **refuses** to render.
+- **image**: builds the container, runs `python -m rh_dashboard.cli selftest`
+  *inside it*, then boots it and drives `/healthz` → `/api/upload` → `/`.
+
+`release.yml` publishes a multi-arch image and the packaged chart to GHCR on a
+`v*` tag, never from `main`.
 
 The CLI resolves its default input/output paths from `__file__`, not the
 working directory, so it behaves the same whichever folder you invoke it from.
@@ -59,7 +75,8 @@ statement rows into tests, fixtures, or commit messages.
 | `rh_dashboard/**` | `./rh-dashboard selftest` |
 | `sample_data/*.csv` | re-derive the expected constants in `selftest.py` **by hand**, then `./rh-dashboard selftest` |
 | `dashboard.py` | `./rh-dashboard selftest`, and confirm `build` output didn't move: diff a fresh `build -i sample_data` against the previous one, ignoring the `Generated` timestamp |
-| `chart/**` | `helm lint ./chart && helm template rh ./chart` |
+| `server.py` | `./rh-dashboard selftest` (group 9 drives the handler over real HTTP), and confirm the CLI page did *not* move — a server-only change that shifts `build` output means upload chrome leaked out of the `interactive` guard |
+| `chart/**` | `helm lint ./chart && helm template rh ./chart`, plus `helm template rh ./chart --set auth.enabled=true` with **no** credentials, which must *fail* |
 | `.github/workflows/**` | nothing local runs it; check the run on the PR |
 
 ## Architecture
@@ -166,7 +183,24 @@ metrics asks `positions.py` for the realized figures.
    validated by running `loader.load_file` over it**, not by sniffing its name
    or header — same "skip loudly" rule as everywhere else, with the parser's
    own error text returned to the user. Uploads are safe to repeat because
-   `dedupe.py` keeps the per-file maximum multiplicity.
+   `dedupe.py` keeps the per-file maximum multiplicity — an identical re-upload
+   answers `duplicate` and writes nothing, while the *same name with different
+   bytes* is kept alongside as `name-2.csv` rather than overwriting.
+   A `PageCache` keyed on the input folder's file list/mtimes/sizes rebuilds
+   the page only when the volume actually changed; upload and delete invalidate
+   it explicitly. Config comes from `ServerConfig.from_env`:
+   `RH_DASHBOARD_USER` + `RH_DASHBOARD_PASSWORD` (Basic auth, **off unless both
+   are set**, and `/healthz` is always exempt so a probe survives a credential
+   change) and `RH_DASHBOARD_MAX_UPLOAD` (default 10 MB; a real 556-row export
+   is ~50 KB). Because "off unless both" **fails open**, a third var
+   `RH_DASHBOARD_AUTH_REQUIRED` lets the operator declare intent: with it set,
+   missing or empty credentials raise `AuthConfigError` and the process exits
+   instead of serving unauthenticated. The chart sets it whenever
+   `auth.enabled`, so a SOPS Secret with a renamed key or an empty value
+   crash-loops visibly. Don't "fix" the fail-open by enabling auth from a
+   partial config — a username with no password is not a password. The container runs `python -m rh_dashboard.cli serve --host
+   0.0.0.0` because the CLI default of `127.0.0.1` is deliberately unreachable
+   from outside a container.
 
 `selftest.py` group 3 unit-tests the FIFO engine (open-only, partial sale, FIFO
 ordering across lots, short options, expiry, oversell) and group 7 asserts the

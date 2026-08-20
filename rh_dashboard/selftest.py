@@ -594,7 +594,54 @@ def _upload(base, filename, payload, headers=None):
 
 def _group_9_server():
     group(9, "http server, upload and file management")
-    from .server import safe_name
+    import os
+
+    from .server import AuthConfigError, ServerConfig, safe_name
+
+    # Credentials arrive as env vars in every deployment, so from_env is the
+    # real configuration surface — and its dangerous failure is fail-open.
+    def _cfg(**env):
+        saved = {k: os.environ.get(k) for k in
+                 ("RH_DASHBOARD_USER", "RH_DASHBOARD_PASSWORD",
+                  "RH_DASHBOARD_AUTH_REQUIRED")}
+        try:
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            return ServerConfig.from_env("in", "out")
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    check("no credentials means auth is off", _cfg().auth_required, False)
+    check("both credentials means auth is on",
+          _cfg(RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD="p").auth_required, True)
+    check("a username alone does not half-enable auth",
+          _cfg(RH_DASHBOARD_USER="u").auth_required, False)
+    check("an empty password does not enable auth",
+          _cfg(RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD="").auth_required, False)
+
+    def _raises(**env):
+        try:
+            _cfg(**env)
+        except AuthConfigError:
+            return True
+        return False
+
+    check("auth demanded but no credentials refuses to start",
+          _raises(RH_DASHBOARD_AUTH_REQUIRED="true"), True)
+    check("auth demanded with only a username refuses to start",
+          _raises(RH_DASHBOARD_AUTH_REQUIRED="true", RH_DASHBOARD_USER="u"), True)
+    check("auth demanded with an empty password refuses to start",
+          _raises(RH_DASHBOARD_AUTH_REQUIRED="true",
+                  RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD=""), True)
+    check("auth demanded and satisfied starts normally",
+          _raises(RH_DASHBOARD_AUTH_REQUIRED="true",
+                  RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD="p"), False)
+    check("the demand flag is opt-in, not any truthy-looking string",
+          _raises(RH_DASHBOARD_AUTH_REQUIRED="false"), False)
 
     # filename sanitising, before any socket is involved
     check("traversal is reduced to a basename", safe_name("../../etc/evil.csv"), "evil.csv")

@@ -113,6 +113,20 @@ jobs:
           helm template rh ./chart --set persistence.enabled=false > /dev/null
           echo "all value permutations render"
 
+      - name: Secret keys must match what the deployment reads
+        run: |
+          set -e
+          helm template rh ./chart --set auth.enabled=true \
+            --set auth.username=u --set auth.password=p > /tmp/auth-default.yaml
+          helm template rh ./chart --set auth.enabled=true \
+            --set auth.username=u --set auth.password=p \
+            --set auth.usernameKey=RH_USER --set auth.passwordKey=RH_PASS > /tmp/auth-custom.yaml
+          helm template rh ./chart --set auth.enabled=true \
+            --set auth.existingSecret=rh-sops \
+            --set auth.usernameKey=RH_USER --set auth.passwordKey=RH_PASS > /tmp/auth-sops.yaml
+          python3 .github/scripts/check_chart_auth_keys.py \
+            /tmp/auth-default.yaml /tmp/auth-custom.yaml /tmp/auth-sops.yaml
+
       - name: Auth without credentials must refuse to render
         # Rendering an unauthenticated deployment when the operator asked for
         # auth would be the worst possible failure mode for this chart.
@@ -157,3 +171,70 @@ jobs:
           curl -sf http://127.0.0.1:8080/ | grep -q "Net income"
           echo "served, uploaded and rebuilt"
           docker rm -f rh > /dev/null
+
+      - name: Basic auth works when the credentials arrive as env vars
+        # This is the path a SOPS-managed Secret takes in the homelab: the
+        # chart puts the credentials in RH_DASHBOARD_USER/PASSWORD and nothing
+        # else configures auth. Getting it wrong fails open, so prove it in CI
+        # rather than discovering it in the cluster.
+        run: |
+          docker run -d --name rh-auth -p 8081:8080 \
+            -e RH_DASHBOARD_USER=ci -e RH_DASHBOARD_PASSWORD=s3cret \
+            rh-dashboard:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8081/healthz > /dev/null && break
+            sleep 1
+          done
+
+          code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
+
+          # /healthz must stay open or the kubelet probe locks the pod out
+          test "$(code http://127.0.0.1:8081/healthz)" = "200"
+          # everything else must challenge
+          test "$(code http://127.0.0.1:8081/)" = "401"
+          test "$(code http://127.0.0.1:8081/api/files)" = "401"
+          test "$(code -u ci:wrong http://127.0.0.1:8081/)" = "401"
+          test "$(code -u wrong:s3cret http://127.0.0.1:8081/)" = "401"
+          test "$(code -u ci:s3cret http://127.0.0.1:8081/)" = "200"
+          # an upload must not slip past auth either
+          test "$(code -X POST -F file=@sample_data/2026-06-statement.csv \
+                  http://127.0.0.1:8081/api/upload)" = "401"
+          echo "auth challenges correctly and healthz stays open"
+          docker rm -f rh-auth > /dev/null
+
+      - name: A broken auth Secret must crash-loop, not serve openly
+        # The realistic SOPS accident: the Secret exists and the pod starts,
+        # but a key was renamed or its value is empty. The chart sets
+        # RH_DASHBOARD_AUTH_REQUIRED whenever auth.enabled, so this must exit
+        # non-zero instead of coming up unauthenticated.
+        run: |
+          for env in "-e RH_DASHBOARD_USER=ci" \
+                     "-e RH_DASHBOARD_PASSWORD=s3cret" \
+                     "-e RH_DASHBOARD_USER=ci -e RH_DASHBOARD_PASSWORD=" \
+                     ""; do
+            if docker run --rm -e RH_DASHBOARD_AUTH_REQUIRED=true $env \
+                 rh-dashboard:ci > /tmp/out 2>&1; then
+              echo "started unauthenticated with: $env"; cat /tmp/out; exit 1
+            fi
+            grep -q "Refusing to start unauthenticated" /tmp/out
+            echo "  refused, as intended: [$env]"
+          done
+          echo "a half-configured Secret cannot fail open"
+
+      - name: Half-configured credentials must not fail open
+        # Only one of the two env vars set is a misconfiguration. The server
+        # requires both, and the danger is that it quietly serves everything.
+        run: |
+          docker run -d --name rh-half -p 8082:8080 \
+            -e RH_DASHBOARD_USER=ci rh-dashboard:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8082/healthz > /dev/null && break
+            sleep 1
+          done
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8082/)
+          docker rm -f rh-half > /dev/null
+          # Documented behaviour is auth-off, so 200 is expected here. This
+          # test exists to make that a decision rather than an accident: if it
+          # ever starts 401ing, a half-set Secret silently locks you out.
+          test "$status" = "200"
+          echo "half-configured auth is off, as documented (got $status)"

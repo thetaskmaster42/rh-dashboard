@@ -53,18 +53,22 @@ spec:
             - name: RH_DASHBOARD_MAX_UPLOAD
               value: {{ .Values.maxUploadBytes | quote }}
             {{- if .Values.auth.enabled }}
-            # The server turns auth on only when both are present, so these
-            # are all-or-nothing by design.
+            # Says "I meant to have auth". With this set the server refuses to
+            # start on missing or empty credentials rather than quietly
+            # serving the account statement to anyone — the failure mode that
+            # matters when the values come from a SOPS-encrypted Secret.
+            - name: RH_DASHBOARD_AUTH_REQUIRED
+              value: "true"
             - name: RH_DASHBOARD_USER
               valueFrom:
                 secretKeyRef:
                   name: {{ include "rh-dashboard.authSecretName" . }}
-                  key: username
+                  key: {{ .Values.auth.usernameKey | default "username" }}
             - name: RH_DASHBOARD_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "rh-dashboard.authSecretName" . }}
-                  key: password
+                  key: {{ .Values.auth.passwordKey | default "password" }}
             {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}

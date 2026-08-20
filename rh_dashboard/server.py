@@ -41,6 +41,11 @@ from .pipeline import build_dashboard
 
 DEFAULT_MAX_UPLOAD = 10 * 1024 * 1024      # 10 MB; a 556-row export is ~50 KB
 SAFE_NAME = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+class AuthConfigError(RuntimeError):
+    """Auth was demanded but not usable. Raised instead of starting."""
 
 
 @dataclass
@@ -58,16 +63,36 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls, input_dir, output_dir, filename: str = "dashboard.html"):
-        """Credentials come from the environment so the Helm chart can wire
-        them straight from a Secret. Auth is off unless *both* are set —
-        half-configured auth that silently allows everything would be worse
-        than none."""
+        """
+        Credentials come from the environment so the chart can wire them
+        straight from a Secret. Auth is off unless *both* are set: a username
+        with no password is not "nearly protected", it is open.
+
+        `RH_DASHBOARD_AUTH_REQUIRED` is how the operator says they meant to
+        have auth. With it set, missing or empty credentials raise instead of
+        starting, so the pod crash-loops visibly rather than serving an
+        account statement to anyone who can reach it. That matters most when
+        the values arrive from a SOPS-encrypted Secret, where a renamed key or
+        an empty string is a plausible mistake and the fail-open version of it
+        is silent.
+        """
+        username = os.environ.get("RH_DASHBOARD_USER") or None
+        password = os.environ.get("RH_DASHBOARD_PASSWORD") or None
+        required = os.environ.get("RH_DASHBOARD_AUTH_REQUIRED", "").strip().lower() in _TRUTHY
+        if required and not (username and password):
+            missing = [name for name, val in
+                       (("RH_DASHBOARD_USER", username),
+                        ("RH_DASHBOARD_PASSWORD", password)) if not val]
+            raise AuthConfigError(
+                "RH_DASHBOARD_AUTH_REQUIRED is set, but "
+                f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} "
+                "empty or missing. Refusing to start unauthenticated — check the "
+                "Secret's key names and that its values are non-empty.")
         return cls(input_dir=Path(input_dir), output_dir=Path(output_dir),
                    filename=filename,
                    max_upload=int(os.environ.get("RH_DASHBOARD_MAX_UPLOAD",
                                                  DEFAULT_MAX_UPLOAD)),
-                   username=os.environ.get("RH_DASHBOARD_USER") or None,
-                   password=os.environ.get("RH_DASHBOARD_PASSWORD") or None)
+                   username=username, password=password)
 
 
 @dataclass

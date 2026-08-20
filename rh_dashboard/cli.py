@@ -60,8 +60,12 @@ def main(argv=None) -> int:
 
 
 def _cmd_serve(args) -> int:
-    from .server import ServerConfig, serve
-    cfg = ServerConfig.from_env(args.input, args.output)
+    from .server import AuthConfigError, ServerConfig, serve
+    try:
+        cfg = ServerConfig.from_env(args.input, args.output)
+    except AuthConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return serve(args.host, args.port, cfg)
 
 
