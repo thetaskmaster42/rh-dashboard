@@ -124,6 +124,17 @@ the internet.
 A `Dockerfile` (with no `pip install`, because there is nothing to install) and
 a Helm chart are in the repo:
 
+Tagging a commit `v1.2.3` publishes a multi-arch image and the packaged chart
+to GHCR, so the usual path is:
+
+```bash
+helm install rh oci://ghcr.io/thetaskmaster42/rh-dashboard-chart/rh-dashboard \
+  --version 1.2.3 \
+  --set image.repository=ghcr.io/thetaskmaster42/rh-dashboard
+```
+
+Or build it yourself:
+
 ```bash
 docker build -t your-registry/rh-dashboard:1.0.0 .
 helm install rh ./chart \

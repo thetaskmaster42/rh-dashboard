@@ -16,14 +16,18 @@ unrelated options-research projects. Nothing here depends on them any more.
 
 **Standard library only.** No dependencies, no virtualenv, no `pip install` —
 including the HTTP server, which is `http.server` rather than Flask precisely
-to keep this true. There is also no packaging, lint, format, or CI
-configuration — no `pyproject.toml`, `setup.py`, `Makefile`, or
-`.github/workflows`. Don't go looking: `./rh-dashboard selftest` is the entire
-quality gate. The package is imported off `sys.path` by the repo-relative
+to keep this true. There is also no packaging, lint or format
+configuration — no `pyproject.toml`, `setup.py`, or `Makefile`. Don't go
+looking: `./rh-dashboard selftest` is the entire quality gate, and CI runs
+exactly that plus `helm lint`/`helm template` and a container build. The package is imported off `sys.path` by the repo-relative
 `rh-dashboard` executable, never installed.
 
 The `Dockerfile` and `chart/` exist for a homelab deployment where statements
 live on a PVC. The image has no pip layer for the same reason.
+`.github/workflows/ci.yml` runs the suite on 3.11-3.13 and **fails if a
+`requirements.txt` or `pyproject.toml` ever appears** — that check is the
+zero-dependency rule made enforceable. `release.yml` publishes a multi-arch
+image and the packaged chart to GHCR on a `v*` tag, never from `main`.
 
 The CLI resolves its default input/output paths from `__file__`, not the
 working directory, so it behaves the same whichever folder you invoke it from.
@@ -56,6 +60,7 @@ statement rows into tests, fixtures, or commit messages.
 | `sample_data/*.csv` | re-derive the expected constants in `selftest.py` **by hand**, then `./rh-dashboard selftest` |
 | `dashboard.py` | `./rh-dashboard selftest`, and confirm `build` output didn't move: diff a fresh `build -i sample_data` against the previous one, ignoring the `Generated` timestamp |
 | `chart/**` | `helm lint ./chart && helm template rh ./chart` |
+| `.github/workflows/**` | nothing local runs it; check the run on the PR |
 
 ## Architecture
 

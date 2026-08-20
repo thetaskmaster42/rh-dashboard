@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    # The whole quality gate. No pytest, no lint config, nothing to install —
+    # `./rh-dashboard selftest` is it, so this job is the build.
+    name: selftest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Confirm nothing needs installing
+        # A dependency sneaking in is a regression in its own right: the
+        # server is http.server rather than Flask specifically to keep this
+        # true, and the Dockerfile has no pip layer because of it.
+        run: |
+          test ! -f requirements.txt || { echo "requirements.txt appeared"; exit 1; }
+          test ! -f pyproject.toml   || { echo "pyproject.toml appeared";   exit 1; }
+
+      - name: Run the suite
+        run: ./rh-dashboard selftest
+
+      - name: Build the sample dashboard
+        run: ./rh-dashboard build -i sample_data -o /tmp/preview
+
+      - name: The generated page must open offline
+        # Group 8 asserts this too; repeated here because it is the project's
+        # central promise and worth failing loudly and early on.
+        run: |
+          page=/tmp/preview/dashboard.html
+          grep -q '<script src=' "$page"   && { echo "external script"; exit 1; }
+          grep -q 'rel="stylesheet"' "$page" && { echo "external stylesheet"; exit 1; }
+          grep -Eq 'https?://' "$page"     && { echo "external reference"; exit 1; }
+          echo "self-contained: $(wc -c < "$page") bytes"
+
+  cli-output-unchanged:
+    # The upload chrome is opt-in, so `build` output must not move when
+    # server-side features change. Rebuild the page at the merge base and at
+    # HEAD and diff them, ignoring only the generation timestamp.
+    name: CLI page is byte-stable
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build at HEAD
+        run: ./rh-dashboard build -i sample_data -o /tmp/head
+
+      - name: Build at the merge base
+        run: |
+          git worktree add /tmp/base "${{ github.event.pull_request.base.sha }}"
+          (cd /tmp/base && ./rh-dashboard build -i sample_data -o /tmp/base-out)
+
+      - name: Diff, ignoring the timestamp
+        run: |
+          strip() { sed 's/Generated [^&]*//' "$1"; }
+          if diff <(strip /tmp/base-out/dashboard.html) <(strip /tmp/head/dashboard.html); then
+            echo "CLI output unchanged"
+          else
+            echo
+            echo "::warning::The CLI-built page changed. That is fine if intended —"
+            echo "::warning::but if this PR only touched server.py, it should not have."
+          fi
+
+  helm:
+    name: helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Lint
+        run: helm lint ./chart
+
+      - name: Render every path that has a conditional in it
+        run: |
+          set -e
+          helm template rh ./chart > /dev/null
+          helm template rh ./chart --set ingress.enabled=true --set ingress.className=nginx > /dev/null
+          helm template rh ./chart --set auth.enabled=true --set auth.username=u --set auth.password=p > /dev/null
+          helm template rh ./chart --set auth.enabled=true --set auth.existingSecret=mine > /dev/null
+          helm template rh ./chart --set persistence.existingClaim=my-pvc > /dev/null
+          helm template rh ./chart --set persistence.enabled=false > /dev/null
+          echo "all value permutations render"
+
+      - name: Auth without credentials must refuse to render
+        # Rendering an unauthenticated deployment when the operator asked for
+        # auth would be the worst possible failure mode for this chart.
+        run: |
+          if helm template rh ./chart --set auth.enabled=true > /dev/null 2>&1; then
+            echo "auth.enabled=true rendered without credentials"; exit 1
+          fi
+          echo "correctly refused"
+
+  image:
+    name: image builds and passes its own suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: rh-dashboard:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run the suite inside the image
+        # sample_data ships in the image for exactly this: proof that what was
+        # built is the thing that passes, not just the source tree beside it.
+        run: docker run --rm rh-dashboard:ci python -m rh_dashboard.cli selftest
+
+      - name: The container serves and accepts an upload
+        run: |
+          docker run -d --name rh -p 8080:8080 rh-dashboard:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz | grep -q '"ok"'
+          curl -sf -F "file=@sample_data/2026-06-statement.csv" \
+            http://127.0.0.1:8080/api/upload | grep -q '"saved"'
+          curl -sf http://127.0.0.1:8080/ | grep -q "Net income"
+          echo "served, uploaded and rebuilt"
+          docker rm -f rh > /dev/null
