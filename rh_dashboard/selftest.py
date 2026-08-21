@@ -532,6 +532,20 @@ def _group_8_dashboard():
         check("page states open cost basis", "$39,105.00" in html, True)
         check("page explains buying is not a loss",
               "converts cash into an asset" in html, True)
+        # The favicon is the one asset with a real pull to embed, so it is
+        # also the easiest thing to "fix" later by linking a file — which
+        # would break the offline guarantee for a single tab icon.
+        check("page declares a favicon", 'rel="icon"' in html, True)
+        check("the favicon is embedded, not linked",
+              'href="data:image/png;base64,' in html, True)
+        # Extract defensively: a missing favicon must fail these checks, not
+        # raise out of the suite and skip every group after this one.
+        parts = html.split('href="data:image/png;base64,')
+        favicon = base64.b64decode(parts[1].split('"')[0]) if len(parts) > 1 else b""
+        check("the embedded favicon is a real PNG",
+              favicon[:8], b"\x89PNG\r\n\x1a\n")
+        check("the favicon stays small enough to inline",
+              0 < len(favicon) < 4096, True)
         check("no external script src", "<script src=" in html, False)
         check("no external stylesheet", 'rel="stylesheet"' in html, False)
         check("no http(s) references at all", "http://" in html or "https://" in html, False)
@@ -676,6 +690,11 @@ def _group_9_server():
         check("an empty input folder still serves a page", status, 200)
         check("the empty page says there is nothing yet", "Nothing to show yet" in page, True)
         check("the empty page still offers the upload dialog", 'id="files-dialog"' in page, True)
+        # Separate document from build_page's, so it needs its own check.
+        check("the empty page carries the favicon too",
+              'href="data:image/png;base64,' in page, True)
+        check("the empty page makes no external request",
+              "http://" in page or "https://" in page, False)
 
         # rejections, each with a reason the dialog can show
         status, res = _upload(base, "notes.txt", csv_bytes)
