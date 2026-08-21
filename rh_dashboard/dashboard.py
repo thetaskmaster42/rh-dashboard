@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from .assets import FAVICON_DATA_URI
 from .metrics import Metrics
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
                     PRIMARY_CATEGORIES, TRANSFER_CATEGORIES, Category)
@@ -736,6 +737,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
 <meta charset="utf-8">
 <title>Robinhood Portfolio Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="32x32" href="{FAVICON_DATA_URI}">
 <style>{CSS}{extra_css}</style>
 </head>
 <body>

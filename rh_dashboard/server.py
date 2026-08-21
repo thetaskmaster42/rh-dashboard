@@ -231,6 +231,7 @@ def _no_data_page(cfg: ServerConfig) -> str:
     so serve a page carrying the same upload dialog rather than a 500 the user
     has no way out of.
     """
+    from .assets import FAVICON_DATA_URI
     from .dashboard import (CSS, INTERACTIVE_CSS, INTERACTIVE_JS, _files_dialog,
                             _header_actions)
     return f"""<!doctype html>
@@ -239,6 +240,7 @@ def _no_data_page(cfg: ServerConfig) -> str:
 <meta charset="utf-8">
 <title>Robinhood Portfolio Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="32x32" href="{FAVICON_DATA_URI}">
 <style>{CSS}{INTERACTIVE_CSS}</style>
 </head>
 <body>
