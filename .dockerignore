@@ -11,3 +11,6 @@ __pycache__
 *.pyc
 Dockerfile
 .dockerignore
+
+# The local uv venv is rebuilt from uv.lock inside the image.
+.venv

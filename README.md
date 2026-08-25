@@ -8,9 +8,10 @@ out what actually closed, and writes a single self-contained HTML dashboard
 answering one question honestly: **did this account make money, and what is
 still held?**
 
-No external dependencies — standard library only. No network calls, no
-external CSS/JS/fonts in the output: the dashboard is one HTML file that opens
-offline, because the input is real account activity.
+Standard library, plus **DuckDB** as the analytical store. No network calls
+and no external CSS/JS/fonts in the *output*: the dashboard is one HTML file
+that opens offline, because the input is real account activity. That guarantee
+is unchanged and CI enforces it.
 
 ## Quick start
 
@@ -19,11 +20,23 @@ offline, because the input is real account activity.
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
-./rh-dashboard selftest           # 313 assertions across 9 groups
+uv run ./rh-dashboard selftest    # 318 assertions across 10 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
 you used `serve`.
+
+`build` and `serve` need nothing installed. The test suite does — DuckDB is
+declared in `pyproject.toml` and pinned in `uv.lock`:
+
+```bash
+uv sync --frozen                  # one dependency, into ./.venv
+uv run ./rh-dashboard selftest
+```
+
+The project itself is never installed (`[tool.uv] package = false`); uv only
+provides the dependency, and `rh-dashboard` still imports the package off
+`sys.path` from the repo.
 
 ### Cost basis
 

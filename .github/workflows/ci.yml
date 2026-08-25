@@ -15,8 +15,8 @@ concurrency:
 
 jobs:
   selftest:
-    # The whole quality gate. No pytest, no lint config, nothing to install —
-    # `./rh-dashboard selftest` is it, so this job is the build.
+    # The whole quality gate. No pytest and no lint config — `uv run
+    # ./rh-dashboard selftest` is it, so this job is the build.
     name: selftest (py${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
@@ -30,19 +30,31 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Confirm nothing needs installing
-        # A dependency sneaking in is a regression in its own right: the
-        # server is http.server rather than Flask specifically to keep this
-        # true, and the Dockerfile has no pip layer because of it.
-        run: |
-          test ! -f requirements.txt || { echo "requirements.txt appeared"; exit 1; }
-          test ! -f pyproject.toml   || { echo "pyproject.toml appeared";   exit 1; }
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+
+      - name: Confirm the dashboard imports nothing undeclared
+        # This replaced a check that asserted requirements.txt and
+        # pyproject.toml did not exist. That was only ever a proxy for the real
+        # rule — rh_dashboard/ pulls in nothing beyond the standard library and
+        # a declared, deliberate few — and it could not survive the project
+        # taking a dependency on purpose. The ast scan enforces the rule
+        # directly, and catches a stray `import requests` that a filename check
+        # never would, including one hidden inside a function body.
+        run: python3 .github/scripts/check_imports.py rh_dashboard
+
+      - name: Install the locked dependencies
+        # --frozen: obey uv.lock exactly. A resolution that would need to
+        # change it fails here rather than silently upgrading DuckDB.
+        run: uv sync --frozen --python ${{ matrix.python }}
 
       - name: Run the suite
-        run: ./rh-dashboard selftest
+        run: uv run --frozen ./rh-dashboard selftest
 
       - name: Build the sample dashboard
-        run: ./rh-dashboard build -i sample_data -o /tmp/preview
+        run: uv run --frozen ./rh-dashboard build -i sample_data -o /tmp/preview
 
       - name: The generated page must open offline
         # Group 8 asserts this too; repeated here because it is the project's
@@ -70,6 +82,10 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Deliberately NOT run through uv. The merge base may predate the
+      # DuckDB dependency entirely, so `uv sync` would fail there — and
+      # `build` imports nothing outside the standard library either way, which
+      # is a property worth continuing to exercise rather than papering over.
       - name: Build at HEAD
         run: ./rh-dashboard build -i sample_data -o /tmp/head
 
