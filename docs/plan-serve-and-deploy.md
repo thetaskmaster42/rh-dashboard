@@ -190,8 +190,9 @@ an upload survives a pod delete.
 ## Why the obvious implementation is wrong
 
 Slicing rows to the window and running the existing pipeline destroys cost basis.
-In `sample_data`, AAPL is bought 2026-06-03 at $180 and half-sold 2026-07-05 at
-$190. Filter to July and the buy disappears:
+In `sample_data`, AAPL is bought twice before it is sold — 2026-06-03 at $180
+and 2026-06-04 at $150 — and 50 shares go on 2026-07-05 at $190. Filter to July
+and both buys disappear:
 
 ```
 full-history match   ->  +$500 realized      correct
@@ -260,11 +261,18 @@ as-of-end one gives the delta form. Full range reduces to today's exactly.
 `compute_positions` three times over `sample_data`:
 
 ```
-2026-06-01..06-30  eq=100.00 opt=  0.00  net=   88.91  cash=-14996.09  err=0.000000
-2026-07-01..07-31  eq=500.00 opt=210.00  net=  709.25  cash=  5189.25  err=0.000000
-full range         eq=600.00 opt=210.00  net=  798.16  cash= -9806.84  err=0.000000
+average cost (the default)
+2026-06-01..06-30  eq= 100.00 opt=  0.00  net=   88.91  cash=-29996.09  err=0.000000
+2026-07-01..07-31  eq=1250.00 opt=210.00  net= 1459.25  cash=  5189.25  err=0.000000
+full range         eq=1350.00 opt=210.00  net= 1548.16  cash=-24806.84  err=0.000000
 
-additivity: 88.91 + 709.25 = 798.16   |   -14996.09 + 5189.25 = -9806.84
+fifo
+2026-06-01..06-30  eq= 100.00 opt=  0.00  net=   88.91  cash=-29996.09  err=0.000000
+2026-07-01..07-31  eq= 500.00 opt=210.00  net=  709.25  cash=  5189.25  err=0.000000
+full range         eq= 600.00 opt=210.00  net=  798.16  cash=-24806.84  err=0.000000
+
+additivity (average): 88.91 + 1459.25 = 1548.16  |  -29996.09 + 5189.25 = -24806.84
+additivity (fifo):    88.91 +  709.25 =  798.16  |  -29996.09 + 5189.25 = -24806.84
 ```
 
 Two disjoint windows summing exactly to the full range, and the July identity
@@ -328,8 +336,8 @@ is the one that stops adding up, since the identity now needs deltas. Print both
 endpoints so the reader can see where the delta came from:
 
 ```
-Net income                                              +$709.25
-Open equity cost basis  $45,405.00 → $39,105.00       +$6,300.00   (excluded)
+Net income                                            +$1,459.25
+Open equity cost basis  $60,405.00 → $54,855.00       +$5,550.00   (excluded)
 Open option cash            $320.00 → $0.00             −$320.00   (excluded)
 Deposits                                                +$500.00   (excluded)
 Withdraw                                              −$2,000.00   (excluded)
@@ -374,12 +382,12 @@ Hand-derived from `sample_data` (June + July 2026, overlapping on the 06/25 and
 |---|---|---|
 | Equity realized | +100.00 (SPY) | **+500.00** (AAPL vs the June $180 lot) |
 | Options realized | 0.00 | **+210.00** (July BTC closing the June STO) |
-| Net income | +88.91 | **+709.25** |
-| Total cash | −14,996.09 | **+5,189.25** |
-| Opening equity basis | 0.00 | **45,405.00** |
-| Ending equity basis | 45,405.00 | **39,105.00** |
+| Net income | +88.91 | **+1,459.25** (fifo: +709.25) |
+| Total cash | −29,996.09 | **+5,189.25** |
+| Opening equity basis | 0.00 | **60,405.00** |
+| Ending equity basis | 60,405.00 | **54,855.00** (fifo: 54,105.00) |
 | Opening option cash | 0.00 | **+320.00** |
-| Open shares (end) | 300 | 270 |
+| Open shares (end) | 400 | 370 |
 | Reconciliation error | 0.00 | 0.00 |
 
 New **group 10**, with these as constants, plus:
@@ -389,10 +397,12 @@ New **group 10**, with these as constants, plus:
   the cleanest proof the as-of view is real rather than a filtered final state.
 - **no spurious warning** in the June window: expiry 7/17 > `last_activity` 6/30.
 - **empty window** `2026-07-01..07-04`: zero rows, `months == ["2026-07"]` (not
-  `[]`), `open_shares == 300`, `open_equity_cost_basis == 45,405.00` — *not*
+  `[]`), `open_shares == 400`, `open_equity_cost_basis == 60,405.00` — *not*
   zeros — and the rendered `<tfoot>` shows them.
-- **one-day window** `2026-07-05..07-05`: `+500` income against `+9,500` cash,
-  Δ basis `−9,000` — one line proving FIFO matched across the boundary.
+- **one-day window** `2026-07-05..07-05`: under average cost `+1,250` income
+  against `+9,500` cash, Δ basis `−8,250`; under fifo `+500` against the same
+  `+9,500`, Δ basis `−9,000`. One line proving lots were matched across the
+  boundary, and that the mode changes only where the split falls.
 - **full-range window ≡ no window**: every existing constant reproduced, both
   opening terms 0.00.
 - **the prefix property directly**: `realized_events(rows < start)` equals, event
@@ -402,8 +412,9 @@ New **group 10**, with these as constants, plus:
 - **orphaned CA basis**: synthetic fixture with an outgoing `SXCH` leg and no
   incoming leg — assert a warning names the undistributed basis rather than the
   banner firing bare.
-- **the anti-regression pair**: windowed equity income is `500.00` and *not*
-  `9,500.00`; windowed options income is `210.00` and *not* `−110.00`.
+- **the anti-regression pair**: windowed equity income is `1,250.00` under
+  average cost (`500.00` under fifo) and *not* `9,500.00`; windowed options
+  income is `210.00` and *not* `−110.00` in either mode.
 
 ---
 

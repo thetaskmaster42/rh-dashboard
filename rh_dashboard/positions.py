@@ -44,7 +44,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
 
-from .model import Category, Classified
+from .model import Category, Classified, CostBasis
 
 # Trans codes that OPEN a position, per category.
 OPENING_CODES = {
@@ -103,6 +103,33 @@ class Lot:
     quantity: float
     cash_per_unit: float      # signed: negative = cash paid, positive = credit received
     opened: date
+
+
+def _absorb(lots: deque, qty: float, cash_per_unit: float, opened: date,
+            blend: bool) -> None:
+    """Add an opening lot to a book.
+
+    Under average cost the book never holds more than one equity lot: a
+    purchase is folded into the running blend, so every close downstream
+    consumes it at the blended rate through the *same* FIFO walk, without
+    needing to know which mode it is in. Under FIFO the lot is queued behind
+    whatever is already there. Keeping the difference to this one function is
+    what stops the two modes drifting apart — there is exactly one place a sale
+    can be matched, and exactly one place a cost can be set.
+
+    The blended lot keeps the *earliest* open date, since that is when the
+    position began, and both the corporate-action and holdings paths read it.
+    """
+    if blend and lots:
+        held = lots[0]
+        total = held.quantity + qty
+        if total > 1e-9:
+            lots[0] = Lot(
+                total,
+                (held.quantity * held.cash_per_unit + qty * cash_per_unit) / total,
+                min(held.opened, opened))
+            return
+    lots.append(Lot(qty, cash_per_unit, opened))
 
 
 @dataclass
@@ -195,7 +222,8 @@ def _phase(c: Classified) -> int:
 
 
 def compute_positions(classified: list[Classified], *,
-                      full_history: list[Classified] | None = None) -> PositionsResult:
+                      full_history: list[Classified] | None = None,
+                      cost_basis: CostBasis = CostBasis.AVERAGE) -> PositionsResult:
     """Match every closing trade against the lots it closes.
 
     `classified` is the range being *reported*. `full_history` is every row the
@@ -204,7 +232,11 @@ def compute_positions(classified: list[Classified], *,
     gap in the input, while a contract whose closing row is simply dated after
     the reported range is not a problem at all. Passing nothing leaves the two
     the same, which is exactly the unwindowed behaviour.
+
+    `cost_basis` selects which open equity lot a sale consumes. It changes when
+    P&L is recognised, not how much of it exists in total — see `CostBasis`.
     """
+    blend_equity = cost_basis is CostBasis.AVERAGE
     tracked = [c for c in classified
                if c.category in OPENING_CODES or c.category is Category.CORPORATE_ACTION]
     tracked.sort(key=lambda c: (c.txn.activity_date, _phase(c),
@@ -288,7 +320,11 @@ def compute_positions(classified: list[Classified], *,
                 pool = ca_basis_pool.get(d, 0.0)
                 share = (qty / total_in) if total_in > 1e-9 else 1.0
                 basis = pool * share
-                book["lots"].append(Lot(qty, -basis / qty if qty else 0.0, d))
+                # Shares received in exchange open a position like any other
+                # purchase, so they blend the same way — otherwise a merger
+                # would quietly leave a second lot behind in average mode.
+                _absorb(book["lots"], qty, -basis / qty if qty else 0.0, d,
+                        blend_equity)
                 ca_basis_consumed[d] = ca_basis_consumed.get(d, 0.0) + basis
                 if pool <= 1e-9:
                     warnings.append(
@@ -300,7 +336,8 @@ def compute_positions(classified: list[Classified], *,
         cash_per_unit = txn.amount / qty
 
         if code in OPENING_CODES[cat]:
-            book["lots"].append(Lot(qty, cash_per_unit, txn.activity_date))
+            _absorb(book["lots"], qty, cash_per_unit, txn.activity_date,
+                    blend_equity and cat is Category.EQUITY)
             continue
 
         if code in CLOSING_CODES[cat]:

@@ -56,6 +56,28 @@ class Category(str, Enum):
         return self.value
 
 
+class CostBasis(str, Enum):
+    """Which open lot a sale consumes.
+
+    `AVERAGE` blends every open equity lot into one running cost, so a sale
+    realises against the blend. `FIFO` consumes the oldest lot first — the IRS
+    default absent a specific-identification election, and what Robinhood's own
+    1099-B reports.
+
+    The two differ only in *timing*. Over a position that fully closes they
+    realise identical lifetime P&L; while it is open they split differently
+    between what is realised and what is still held. That split is precisely
+    what a date window makes visible, which is why the mode is selectable
+    rather than assumed — and why the page has to say which one produced it.
+    Two dashboards built with different settings look identical and disagree.
+
+    Options ignore this entirely: a short-to-open contract has no purchase
+    price to average, and two strikes on the same underlying must never blend.
+    """
+    AVERAGE = "average"
+    FIFO = "fifo"
+
+
 # Fixed display order. Every table/chart iterates categories in this order so a
 # category's colour slot never shifts when one category happens to be empty.
 # The first eight get their own categorical hue; DEBITS/CREDITS are the

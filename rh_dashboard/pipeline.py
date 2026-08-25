@@ -20,14 +20,15 @@ from .dashboard import build_page
 from .dedupe import dedupe
 from .loader import LoadError, load_folder
 from .metrics import compute
-from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES
+from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES, CostBasis
 from .positions import compute_positions
 
 
 def build_dashboard(input_dir: str | Path = "input",
                     output_dir: str | Path = "output",
                     filename: str = "dashboard.html",
-                    interactive: bool = False) -> dict:
+                    interactive: bool = False,
+                    cost_basis: CostBasis = CostBasis.AVERAGE) -> dict:
     """
     Read every CSV in `input_dir`, dedupe, categorise, match positions, and
     write a self-contained HTML dashboard to `output_dir/filename`.
@@ -36,6 +37,11 @@ def build_dashboard(input_dir: str | Path = "input",
     `server.py` and never by the CLI, so a dashboard built on the command line
     stays a plain file with no controls that need a server behind them.
 
+    `cost_basis` picks which open equity lot a sale consumes; it changes when
+    P&L is recognised, not how much of it exists. The page states which mode
+    produced it, because two dashboards built with different settings look
+    identical and disagree.
+
     Raises `LoadError` if `input_dir` doesn't exist or has no CSVs — that's a
     setup problem, not a data problem. Bad individual rows are never fatal:
     they're skipped and reported in `row_errors`.
@@ -43,11 +49,12 @@ def build_dashboard(input_dir: str | Path = "input",
     load_result = load_folder(input_dir)
     dd = dedupe(load_result.transactions)
     classified = categorize_all(dd.kept)
-    positions = compute_positions(classified)
+    positions = compute_positions(classified, cost_basis=cost_basis)
     metrics = compute(classified, positions, dd.removed, load_result.row_errors)
 
     html = build_page(metrics, positions, classified, load_result.files_read,
-                      load_result.row_errors, interactive=interactive)
+                      load_result.row_errors, interactive=interactive,
+                      cost_basis=cost_basis)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +78,7 @@ def build_dashboard(input_dir: str | Path = "input",
                                   for c in TRANSFER_CATEGORIES},
         "other_income": metrics.other_income,
         "net_income": metrics.net_income,
+        "cost_basis": cost_basis.value,
         "open_shares": metrics.open_shares,
         "open_equity_cost_basis": metrics.open_equity_cost_basis,
         "open_options_net_cash": metrics.open_options_net_cash,
