@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from datetime import date
+
 from .model import CostBasis
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +30,33 @@ def _add_cost_basis(p: argparse.ArgumentParser) -> None:
                         f"{CostBasis.FIFO.value} matches a 1099-B)")
 
 
+def _iso_date(value: str) -> date:
+    """An ISO date, refused rather than guessed at if it is anything else."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an ISO date (YYYY-MM-DD)") from None
+
+
+def _add_window(p: argparse.ArgumentParser) -> None:
+    """Narrow what is reported, never how lots are matched.
+
+    `dest` is explicit because `--from` would otherwise land on an attribute
+    named `from`, which is a keyword and unreachable as `args.from`.
+
+    Either bound may be given alone: a missing end means "up to the last row on
+    file", a missing start means "from the first". Both are inclusive, and both
+    are read against Activity Date — the same field the matching engine sorts
+    on. Process and settle dates would split a same-day corporate action across
+    the boundary.
+    """
+    p.add_argument("--from", dest="start", type=_iso_date, metavar="YYYY-MM-DD",
+                   help="report from this activity date (inclusive)")
+    p.add_argument("--to", dest="end", type=_iso_date, metavar="YYYY-MM-DD",
+                   help="report up to this activity date (inclusive)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rh-dashboard",
@@ -44,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--filename", default="dashboard.html",
                    help="output file name (default: dashboard.html)")
     _add_cost_basis(b)
+    _add_window(b)
 
     v = sub.add_parser("serve", help="serve the dashboard and accept CSV uploads")
     v.add_argument("--host", default="127.0.0.1",
@@ -96,7 +126,8 @@ def _cmd_build(args) -> int:
         res = build_dashboard(input_dir=args.input, output_dir=args.output,
                               filename=args.filename,
                               cost_basis=(CostBasis(args.cost_basis)
-                                          if args.cost_basis else CostBasis.AVERAGE))
+                                          if args.cost_basis else CostBasis.AVERAGE),
+                              start=args.start, end=args.end)
     except LoadError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

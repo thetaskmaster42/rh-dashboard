@@ -13,6 +13,7 @@ cash sums (see `positions.py` and `model.LOT_MATCHED_CATEGORIES`).
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from .categorize import categorize_all
@@ -20,15 +21,17 @@ from .dashboard import build_page
 from .dedupe import dedupe
 from .loader import LoadError, load_folder
 from .metrics import compute
-from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES, CostBasis
-from .positions import compute_positions
+from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES, CostBasis, Window
+from .positions import compute_positions, compute_windowed
 
 
 def build_dashboard(input_dir: str | Path = "input",
                     output_dir: str | Path = "output",
                     filename: str = "dashboard.html",
                     interactive: bool = False,
-                    cost_basis: CostBasis = CostBasis.AVERAGE) -> dict:
+                    cost_basis: CostBasis = CostBasis.AVERAGE,
+                    start: date | None = None,
+                    end: date | None = None) -> dict:
     """
     Read every CSV in `input_dir`, dedupe, categorise, match positions, and
     write a self-contained HTML dashboard to `output_dir/filename`.
@@ -42,6 +45,11 @@ def build_dashboard(input_dir: str | Path = "input",
     produced it, because two dashboards built with different settings look
     identical and disagree.
 
+    `start` and `end` narrow what is *reported*, never how lots are matched —
+    see `positions.compute_windowed`. Either may be given alone: a missing end
+    means "up to the last row on file", a missing start means "from the first".
+    Both omitted is the unwindowed report, byte for byte as before.
+
     Raises `LoadError` if `input_dir` doesn't exist or has no CSVs — that's a
     setup problem, not a data problem. Bad individual rows are never fatal:
     they're skipped and reported in `row_errors`.
@@ -49,10 +57,32 @@ def build_dashboard(input_dir: str | Path = "input",
     load_result = load_folder(input_dir)
     dd = dedupe(load_result.transactions)
     classified = categorize_all(dd.kept)
-    positions = compute_positions(classified, cost_basis=cost_basis)
-    metrics = compute(classified, positions, dd.removed, load_result.row_errors)
 
-    html = build_page(metrics, positions, classified, load_result.files_read,
+    # The statements' own span, kept separate from whatever range is reported:
+    # the page has to be able to say "matched over all of this, shown for that".
+    all_dates = [c.txn.activity_date for c in classified]
+    full_range = ((min(all_dates).isoformat(), max(all_dates).isoformat())
+                  if all_dates else None)
+
+    window = None
+    if (start or end) and all_dates:
+        # An open-ended request is resolved against the data rather than
+        # refused: "everything since April" is a reasonable thing to ask.
+        window = Window(start or min(all_dates), end or max(all_dates))
+
+    if window is None:
+        positions = compute_positions(classified, cost_basis=cost_basis)
+        reported = classified
+        opening = None
+    else:
+        positions, opening = compute_windowed(classified, window,
+                                              cost_basis=cost_basis)
+        reported = [c for c in classified if window.contains(c.txn.activity_date)]
+
+    metrics = compute(reported, positions, dd.removed, load_result.row_errors,
+                      window=window, opening=opening, full_range=full_range)
+
+    html = build_page(metrics, positions, reported, load_result.files_read,
                       load_result.row_errors, interactive=interactive,
                       cost_basis=cost_basis)
 
@@ -79,6 +109,8 @@ def build_dashboard(input_dir: str | Path = "input",
         "other_income": metrics.other_income,
         "net_income": metrics.net_income,
         "cost_basis": cost_basis.value,
+        "window": (window.start.isoformat(), window.end.isoformat()) if window else None,
+        "full_range": full_range,
         "open_shares": metrics.open_shares,
         "open_equity_cost_basis": metrics.open_equity_cost_basis,
         "open_options_net_cash": metrics.open_options_net_cash,

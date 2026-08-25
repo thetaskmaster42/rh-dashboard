@@ -89,11 +89,12 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build --filename jan.html             # rename the output file
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
-uv run ./rh-dashboard selftest                       # 369 assertions across 11 groups
+./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
+uv run ./rh-dashboard selftest                       # 395 assertions across 12 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 11 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 12 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
@@ -253,7 +254,9 @@ metrics asks `positions.py` for the realized figures.
    categories already spend the categorical palette's validated 8-slot ceiling.
    **`dashboard.py`** assembles the page: Summary (net income + the two-column
    calculation/reconciliation tables), the open-positions table, stat tiles,
-   legend/filter chips, transaction table, the cost-basis note (the page
+   legend/filter chips, transaction table, the window callout and the
+   as-of-date caption (**every "still held" string on the page must agree with
+   `_as_of(m)`**, or the page contradicts itself), the cost-basis note (the page
    **states which mode produced it** — two dashboards built from the same
    statements under different settings otherwise look identical and report
    different numbers, and the footer used to claim FIFO unconditionally),

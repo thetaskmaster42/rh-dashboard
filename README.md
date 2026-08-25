@@ -20,7 +20,8 @@ is unchanged and CI enforces it.
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
-uv run ./rh-dashboard selftest    # 369 assertions across 11 groups
+./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
+uv run ./rh-dashboard selftest    # 395 assertions across 12 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
@@ -37,6 +38,29 @@ uv run ./rh-dashboard selftest
 The project itself is never installed (`[tool.uv] package = false`); uv only
 provides the dependency, and `rh-dashboard` still imports the package off
 `sys.path` from the repo.
+
+### Date windows
+
+`--from` and `--to` narrow what is *reported*. They never change how lots are
+matched, which is the whole difficulty: filter the rows first and a sale whose
+purchase falls outside the range looks like pure profit. On the bundled sample,
+AAPL is bought in June and part-sold in July —
+
+```
+matched over full history, reported for July   ->  +$1,250   correct
+rows filtered to July, then matched            ->  +$9,500   nonsense
+```
+
+So lots are always matched over the whole statement history and only the
+reporting is narrowed. Open-position figures are stated **as of the window
+end**, and the reconciliation column shows how each moved *across* the window
+rather than its total. The page says so in a callout, and dates its own
+holdings.
+
+Either bound may be given alone: `--from` runs to the last row on file, `--to`
+starts at the first. Both are inclusive and both read Activity Date — the same
+field the matching engine sorts on, since process and settle dates would split
+a same-day corporate action across the boundary.
 
 ### Cost basis
 
