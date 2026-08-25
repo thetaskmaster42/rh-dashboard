@@ -64,7 +64,7 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build --filename jan.html             # rename the output file
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
-./rh-dashboard selftest                              # 302 assertions across 9 groups
+./rh-dashboard selftest                              # 313 assertions across 9 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
@@ -85,7 +85,7 @@ statement rows into tests, fixtures, or commit messages.
 | `sample_data/*.csv` | re-derive the expected constants in `selftest.py` **by hand**, then `./rh-dashboard selftest` |
 | `dashboard.py` | `./rh-dashboard selftest`, and confirm `build` output didn't move: diff a fresh `build -i sample_data` against the previous one, ignoring the `Generated` timestamp |
 | `server.py` | `./rh-dashboard selftest` (group 9 drives the handler over real HTTP), and confirm the CLI page did *not* move — a server-only change that shifts `build` output means upload chrome leaked out of the `interactive` guard |
-| `positions.py` | `./rh-dashboard selftest`, and check the change under **both** cost bases — `--cost-basis average` and `fifo` — since `sample_data` alone cannot tell them apart |
+| `positions.py` | `./rh-dashboard selftest`, and check the change under **both** cost bases — `--cost-basis average` and `fifo` — the two report different numbers on `sample_data`, so a change that makes them agree is a bug |
 | `chart/**` | `helm lint ./chart && helm template rh ./chart`, plus `helm template rh ./chart --set auth.enabled=true` with **no** credentials, which must *fail*; if you touched the Secret or the Deployment's env, also render with `auth.usernameKey`/`auth.passwordKey` overridden and run `.github/scripts/check_chart_auth_keys.py` over the output |
 | `.github/workflows/**` | nothing local runs it; check the run on the PR |
 
@@ -268,16 +268,22 @@ metrics asks `positions.py` for the realized figures.
 ordering across lots, average-cost blending, short options, expiry, oversell,
 orphaned corporate-action basis) and group 7 asserts the reconciliation
 invariants. `sample_data/` is built specifically to exercise the
-open/partial/closed cases — TSLA never sold, AAPL half sold, SPY fully closed —
-so those numbers are load-bearing; changing the CSVs means re-deriving the
+open/partial/closed cases — TSLA never sold, SPY fully closed, and **AAPL
+bought twice before it is sold** (100 @ $180 then 100 @ $150, 50 sold at $190)
+— so those numbers are load-bearing; changing the CSVs means re-deriving the
 expected constants in `selftest.py` by hand.
 
-**What `sample_data` cannot test**: no ticker in it has two buys before a sell,
-so average cost and FIFO agree on every figure in the fixture and it cannot
-tell the two modes apart. The multi-lot fixture in group 3 is what actually
-verifies the cost-basis setting; group 4 asserts the equivalence explicitly, so
-adding a second lot to `sample_data` fails there rather than silently making a
-mode-specific bug invisible.
+**AAPL's two lots are what make the cost-basis setting testable.** It is the
+only shape where the modes can disagree, and they do: equity realized is
+`+1,350` averaged against `+600` FIFO, net income `1,548.16` against `798.16`,
+open basis `54,855` against `54,105`. Note the **750 appears in realized and in
+open basis in opposite directions, so total cash movement is identical either
+way** (`-24,806.84`) — that single number is the whole claim about cost basis:
+it moves P&L through time without creating or destroying any. Group 4 asserts
+that invariant directly, so a change that makes the two modes agree — or that
+makes cash disagree — fails there rather than passing quietly. The `Price`
+column is *not* what the engine reads; cost per unit is `amount / quantity`, so
+a second lot only creates a divergence if its **Amount** differs per share.
 
 ## Convention
 

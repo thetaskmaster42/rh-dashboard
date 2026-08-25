@@ -19,7 +19,7 @@ offline, because the input is real account activity.
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
-./rh-dashboard selftest           # 302 assertions across 9 groups
+./rh-dashboard selftest           # 313 assertions across 9 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if

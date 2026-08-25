@@ -449,24 +449,45 @@ def _group_3_fifo():
 # under test: each figure below was worked out from the two CSVs by hand and
 # cross-checked against the arithmetic in the comments.
 #
-#   Equity realized  SPY (560-550)*10 = +100 ; AAPL (190-180)*50 = +500  -> +600
-#   Open equity      TSLA 100*250 + AAPL 50*180 + NVDA 20*135 = 36,700 (170 sh)
-#   Options realized STO +320 then BTC -110 on one contract              -> +210
-#   Div/Interest     CDIV 8.75 + MDIV 3.10                               -> +11.85
-#   Fees             AFEE                                                -> -2.50
-#   Margin           INT (negative)                                      -> -12.34
-#   Gold             GOLD -5.00 + GDBP -5.00                             -> -10.00
-#   Other            SLIP (no rule)                                      -> +1.15
-#   Net income       600+210+11.85-2.50-12.34-10.00+1.15                 -> +798.16
+# AAPL is bought TWICE before it is sold — 100 @ $180 on 06/03 and 100 @ $150
+# on 06/04 — which is the only shape where the two cost bases can disagree.
+# Everything else in the fixture is single-lot and reads the same either way.
+#
+#   AAPL blended cost  (100*180 + 100*150) / 200                     -> $165.00
+#   AAPL realized      average: (190-165)*50                         -> +1,250
+#                      fifo:    (190-180)*50, oldest lot first       ->   +500
+#   SPY realized       (560-550)*10                                  ->   +100
+#   Equity realized    average 1,250+100 = +1,350 ; fifo 500+100     ->   +600
+#   Options realized   STO +320 then BTC -110 on one contract        ->   +210
+#   Div/Interest       CDIV 8.75 + MDIV 3.10                         -> +11.85
+#   Fees               AFEE                                          ->  -2.50
+#   Margin             INT (negative)                                -> -12.34
+#   Gold               GOLD -5.00 + GDBP -5.00                       -> -10.00
+#   Other              SLIP (no rule)                                ->  +1.15
+#   Net income         average 1350+210+11.85-2.50-12.34-10+1.15     -> +1,548.16
+#                      fifo     600+210+11.85-2.50-12.34-10+1.15     ->   +798.16
 #
 # A corporate action is also present: CCIV 100 bought for $2,405, then
 # surrendered for 100 LCID the following month. It carries NO Amount, so it
 # changes no income figure at all — it only moves the $2,405 of cost basis
 # from CCIV to LCID, which is exactly the property being asserted.
-#   Open equity      TSLA 25,000 + AAPL 9,000 + NVDA 2,700 + LCID 2,405
-#                                                          = 39,105 (270 sh)
-EXPECTED_INCOME = {
-    Category.EQUITY: 600.00,
+#
+#   AAPL still held    150 shares: average 150*165 = 24,750 ; fifo
+#                      50*180 + 100*150 = 24,000
+#   Open equity        average  25,000 + 24,750 + 2,700 + 2,405 = 54,855
+#                      fifo     25,000 + 24,000 + 2,700 + 2,405 = 54,105
+#                      370 shares either way
+#
+# The two modes differ by exactly 750 in realized income AND by exactly 750 in
+# open cost basis, in opposite directions — so total cash movement is IDENTICAL
+# under both. That is the whole claim about cost basis in one number: it moves
+# P&L through time without creating or destroying any.
+#
+#   Total cash         both modes                                    -> -24,806.84
+#     average  1,548.16 - 54,855 + 0 + 28,500 = -24,806.84
+#     fifo       798.16 - 54,105 + 0 + 28,500 = -24,806.84
+EXPECTED_INCOME = {                 # the default mode: average cost
+    Category.EQUITY: 1350.00,
     Category.OPTIONS: 210.00,
     Category.DIVIDENDS_INTEREST: 11.85,
     Category.FEES: -2.50,
@@ -474,17 +495,22 @@ EXPECTED_INCOME = {
     Category.GOLD: -10.00,
 }
 EXPECTED_COUNTS = {
-    Category.EQUITY: 7, Category.OPTIONS: 2, Category.DIVIDENDS_INTEREST: 2,
+    Category.EQUITY: 8, Category.OPTIONS: 2, Category.DIVIDENDS_INTEREST: 2,
     Category.FEES: 1, Category.MARGIN: 1, Category.GOLD: 2,
     Category.DEPOSITS: 2, Category.WITHDRAW: 1, Category.CORPORATE_ACTION: 2,
 }
-EXPECTED_NET_INCOME = 798.16
-EXPECTED_OPEN_SHARES = 270.0
-EXPECTED_OPEN_COST = 39105.00
-EXPECTED_TOTAL_CASH = -9806.84
+EXPECTED_NET_INCOME = 1548.16       # average cost
+EXPECTED_OPEN_SHARES = 370.0        # unchanged by the mode
+EXPECTED_OPEN_COST = 54855.00       # average cost
+EXPECTED_TOTAL_CASH = -24806.84     # unchanged by the mode
 EXPECTED_DEPOSITS = 30500.00
 EXPECTED_WITHDRAW = -2000.00
 EXPECTED_OTHER = 1.15
+
+# The same fixture read the other way. Only three figures move.
+EXPECTED_FIFO_EQUITY = 600.00
+EXPECTED_FIFO_NET_INCOME = 798.16
+EXPECTED_FIFO_OPEN_COST = 54105.00
 
 
 def _sample_metrics():
@@ -501,9 +527,9 @@ def _group_4_sample_totals():
     lr, dd, classified, positions, m = _sample_metrics()
 
     check("no row errors in the sample CSVs", len(lr.row_errors), 0)
-    check("23 raw rows across both files", len(lr.transactions), 23)
+    check("24 raw rows across both files", len(lr.transactions), 24)
     check("2 cross-file duplicates removed", dd.removed, 2)
-    check("21 transactions kept", len(dd.kept), 21)
+    check("22 transactions kept", len(dd.kept), 22)
     check("no lot-matching warnings on clean data", len(positions.warnings), 0)
     # corporate action rows carry no Amount and must survive the loader
     check("corporate action rows are loaded, not dropped as unparseable",
@@ -529,33 +555,58 @@ def _group_4_sample_totals():
     held = {h.instrument: h for h in positions.equity_holdings}
     check("TSLA fully open (never sold)", held["TSLA"].quantity, 100.0)
     check("TSLA cost basis", held["TSLA"].cost_basis, 25000.0)
-    check("AAPL half open after selling 50 of 100", held["AAPL"].quantity, 50.0)
-    check("AAPL remaining cost basis", held["AAPL"].cost_basis, 9000.0)
+    check("AAPL open after selling 50 of 200 across two lots",
+          held["AAPL"].quantity, 150.0)
+    check("AAPL remaining cost basis at the blend", held["AAPL"].cost_basis, 24750.0)
+    check("AAPL per-share cost is the blend, not either lot price",
+          held["AAPL"].avg_price, 165.0)
     check("NVDA fully open", held["NVDA"].quantity, 20.0)
     check("SPY fully closed, not in holdings", "SPY" in held, False)
     # the corporate action: CCIV is gone, LCID holds its basis, income untouched
     check("CCIV surrendered, no longer held", "CCIV" in held, False)
     check("LCID received in exchange", held["LCID"].quantity, 100.0)
     check("LCID inherited CCIV's cost basis", held["LCID"].cost_basis, 2405.00)
-    check("the exchange realized nothing", m.income_of(Category.EQUITY), 600.00)
+    check("the exchange realized nothing",
+          m.income_of(Category.EQUITY), EXPECTED_INCOME[Category.EQUITY])
     check("corporate action moved no cash",
           m.categories[Category.CORPORATE_ACTION].cash_total, 0.0)
 
-    # Every figure above is identical under either cost basis, because no
-    # ticker in the fixture has two buys before a sell. That is worth asserting
-    # rather than assuming: it is the reason the multi-lot fixture in group 3
-    # exists, and if someone adds a second lot to sample_data these totals move
-    # and this check is what says so.
+    # --- the same fixture read under FIFO ---------------------------------
+    # AAPL's two lots are what make this possible: the fixture used to agree
+    # with itself under either mode, which meant it could not test the setting
+    # at all. Each figure below is hand-derived in the block above.
     fifo = compute_positions(classified, cost_basis=CostBasis.FIFO)
     avg = compute_positions(classified, cost_basis=CostBasis.AVERAGE)
-    for cat in (Category.EQUITY, Category.OPTIONS):
-        check(f"sample_data cannot distinguish cost basis ({cat.value})",
-              fifo.realized(cat), avg.realized(cat))
-    check("sample_data open basis is the same under either cost basis",
-          fifo.open_equity_cost_basis, avg.open_equity_cost_basis)
-    check("sample_data holdings are the same under either cost basis",
-          [(h.key, h.quantity, round(h.avg_price, 6)) for h in fifo.equity_holdings],
-          [(h.key, h.quantity, round(h.avg_price, 6)) for h in avg.equity_holdings])
+    fifo_m = compute(classified, fifo, dd.removed, lr.row_errors)
+
+    check("fifo: equity realized takes the oldest lot",
+          fifo.realized(Category.EQUITY), EXPECTED_FIFO_EQUITY)
+    check("fifo: net income", fifo_m.net_income, EXPECTED_FIFO_NET_INCOME)
+    check("fifo: open equity cost basis",
+          fifo.open_equity_cost_basis, EXPECTED_FIFO_OPEN_COST)
+    fifo_held = {h.instrument: h for h in fifo.equity_holdings}
+    check("fifo: AAPL keeps the untouched lot plus the remainder of the first",
+          fifo_held["AAPL"].cost_basis, 24000.0)       # 50*180 + 100*150
+    check("fifo: AAPL per-share cost", fifo_held["AAPL"].avg_price, 160.0)
+
+    # The anti-regression pair: these must not collapse back into each other.
+    check("the two modes disagree on equity income",
+          avg.realized(Category.EQUITY) - fifo.realized(Category.EQUITY), 750.00)
+    check("options are untouched by the mode",
+          avg.realized(Category.OPTIONS), fifo.realized(Category.OPTIONS))
+    check("share count is untouched by the mode",
+          (avg.open_shares, fifo.open_shares),
+          (EXPECTED_OPEN_SHARES, EXPECTED_OPEN_SHARES))
+
+    # ...and the invariant that makes the whole idea honest: whatever one mode
+    # recognises early, it holds back in open basis by exactly as much, so the
+    # cash that actually moved is the same number either way.
+    check("what one mode realizes early it holds back in basis",
+          avg.open_equity_cost_basis - fifo.open_equity_cost_basis,
+          avg.realized(Category.EQUITY) - fifo.realized(Category.EQUITY))
+    check("total cash movement is identical under both modes",
+          fifo_m.total_cash_movement, m.total_cash_movement)
+    check("both modes reconcile", (m.reconciles, fifo_m.reconciles), (True, True))
 
 
 def _group_5_categorize():
@@ -723,11 +774,18 @@ def _group_8_dashboard():
               "Equity cost basis: <strong>FIFO (first in, first out)</strong>" in alt_html,
               True)
         check("the alternate mode is surfaced in the result", alt["cost_basis"], "fifo")
-        check("both modes agree on net income for this fixture",
-              alt["net_income"], res["net_income"])
-        check("switching cost basis changes only the prose for this fixture",
-              len(_strip_generated(html).splitlines()),
-              len(_strip_generated(alt_html).splitlines()))
+        # AAPL's two lots mean the fixture now reports genuinely different
+        # numbers under the two modes — which is the point of having it.
+        check("the two pages report different net income",
+              alt["net_income"], EXPECTED_FIFO_NET_INCOME)
+        check("...and it is not the default's figure",
+              alt["net_income"] != res["net_income"], True)
+        check("the FIFO page prints its own net income",
+              "$798.16" in alt_html, True)
+        check("the FIFO page does not print the average-cost figure",
+              "$1,548.16" in alt_html, False)
+        check("both pages agree on shares held",
+              alt["open_shares"], res["open_shares"])
         for label in ("Net income", "Open positions", "Equity", "Options",
                       "Dividends/Interest", "Fees", "Margin", "Gold",
                       "Deposits", "Withdraw", "Corporate action",
@@ -735,9 +793,9 @@ def _group_8_dashboard():
             check(f"page mentions {label}", label in html, True)
         check("page does not list the surrendered ticker as held",
               ">CCIV<" in html.split('id="txn-table"')[0], False)
-        check("page states the net income figure", "$798.16" in html, True)
-        check("page states total shares held", "270 shares" in html, True)
-        check("page states open cost basis", "$39,105.00" in html, True)
+        check("page states the net income figure", "$1,548.16" in html, True)
+        check("page states total shares held", "370 shares" in html, True)
+        check("page states open cost basis", "$54,855.00" in html, True)
         check("page explains buying is not a loss",
               "converts cash into an asset" in html, True)
         # The favicon is the one asset with a real pull to embed, so it is
@@ -960,7 +1018,7 @@ def _group_9_server():
         check("a valid statement is accepted", status, 200)
         check("the accepted upload reports its name", res["saved_as"],
               "2026-06-statement.csv")
-        check("the accepted upload reports its row count", res["rows"], 11)
+        check("the accepted upload reports its row count", res["rows"], 12)
         check("the file landed in the input folder",
               (cfg.input_dir / "2026-06-statement.csv").is_file(), True)
 
