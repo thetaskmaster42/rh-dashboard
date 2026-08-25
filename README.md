@@ -21,7 +21,7 @@ is unchanged and CI enforces it.
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest    # 395 assertions across 12 groups
+uv run ./rh-dashboard selftest    # 425 assertions across 13 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
@@ -61,6 +61,24 @@ Either bound may be given alone: `--from` runs to the last row on file, `--to`
 starts at the first. Both are inclusive and both read Activity Date — the same
 field the matching engine sorts on, since process and settle dates would split
 a same-day corporate action across the boundary.
+
+### By ticker
+
+The page splits net income per ticker: realized equity and options P&L on
+closed lots, dividends, and what is still held. Attribution comes from the
+statement's own Instrument column, and an option is grouped under its
+*underlying* rather than its contract.
+
+Account-level costs — margin interest, account fees, the Gold subscription,
+stock lending income — belong to no ticker and are shown as **Unattributed**
+rather than spread across them. That is what lets the column add up:
+
+```
+sum(per-ticker contributions) + unattributed  ==  net income
+```
+
+which the test suite asserts, and which the page proves by printing a total
+that matches the headline figure.
 
 ### Cost basis
 

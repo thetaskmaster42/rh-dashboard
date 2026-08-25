@@ -44,7 +44,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 12
+GROUPS = 13
 
 
 def _close(got, want, tol) -> bool:
@@ -94,6 +94,22 @@ def _calc_column(page: str, heading: str) -> list[tuple[str, float]]:
         raw = html_mod.unescape(m.group(2)).replace("$", "").replace(",", "").strip()
         neg = raw.startswith("-")
         out.append((label, float(raw.lstrip("+-")) * (-1 if neg else 1)))
+    return out
+
+
+def _ticker_column(page: str) -> list[tuple[str, float]]:
+    """(ticker, net contribution) from the rendered by-ticker table, total last."""
+    block = page.split('id="by-ticker"')[1].split("</table>")[0]
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", block, re.S):
+        cells = [html_mod.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+        if len(cells) < 8 or cells[0] == "Ticker":
+            continue
+        raw = cells[-1].replace("$", "").replace(",", "")
+        if raw in ("", "\u2014"):
+            continue
+        out.append((cells[0], float(raw.lstrip("+-")) * (-1 if raw.startswith("-") else 1)))
     return out
 
 
@@ -1393,6 +1409,95 @@ def _group_12_window_page():
         shutil.rmtree(tmp)
 
 
+def _group_13_by_ticker():
+    """Net income split per ticker, and the identity that keeps it honest."""
+    group(13, "per-ticker attribution")
+    _, _, _, _, m = _sample_metrics()
+    by = {t.ticker: t for t in m.by_ticker}
+
+    # Attribution reads the Instrument column, which already carries the ticker
+    # on a dividend row and the *underlying* on an option row. Asserting the
+    # split per ticker is what proves that, rather than a rule that happens to
+    # work on this fixture.
+    check("AAPL realized equity", by["AAPL"].realized_equity, 1250.00)
+    check("AAPL realized options come from the underlying, not the contract",
+          by["AAPL"].realized_options, 210.00)
+    check("AAPL dividends", by["AAPL"].dividends, 3.10)
+    check("AAPL net contribution", by["AAPL"].net_contribution, 1463.10)
+    check("AAPL shares still held", by["AAPL"].shares, 150.0)
+
+    check("SPY realized equity", by["SPY"].realized_equity, 100.00)
+    check("SPY dividends", by["SPY"].dividends, 8.75)
+    check("SPY net contribution", by["SPY"].net_contribution, 108.75)
+    check("SPY is fully closed, so nothing is held", by["SPY"].shares, 0.0)
+
+    check("a position never sold contributes nothing",
+          by["TSLA"].net_contribution, 0.0)
+    check("...but is still reported as held", by["TSLA"].shares, 100.0)
+    check("shares received in an exchange are held under the new ticker",
+          by["LCID"].shares, 100.0)
+    check("the surrendered ticker is gone from the rollup", "CCIV" in by, False)
+
+    # Account-level costs belong to no ticker. Naming them is what keeps the
+    # column summing; spreading them across tickers would be a guess.
+    u = m.unattributed
+    check("account-level costs land in Unattributed",
+          u.other_income, -23.69)          # -2.50 fees -12.34 margin -10 gold +1.15
+    check("Unattributed holds no shares", u.shares, 0.0)
+    check("Unattributed claims no realized trades",
+          (u.realized_equity, u.realized_options), (0.0, 0.0))
+
+    # The identity: nothing dropped, nothing double-counted.
+    check("per-ticker contributions plus unattributed equal net income",
+          sum(t.net_contribution for t in m.by_ticker) + u.net_contribution,
+          m.net_income)
+    check("attribution error is zero", m.ticker_attribution_error, 0.0)
+
+    # It has to hold under the other cost basis too, at different numbers.
+    lr = load_folder(SAMPLE)
+    dd = dedupe(lr.transactions)
+    cls = categorize_all(dd.kept)
+    fifo_pos = compute_positions(cls, cost_basis=CostBasis.FIFO)
+    fifo_m = compute(cls, fifo_pos, dd.removed, lr.row_errors)
+    fifo_by = {t.ticker: t for t in fifo_m.by_ticker}
+    check("fifo: AAPL contributes less, the rest sitting in open basis",
+          fifo_by["AAPL"].net_contribution, 713.10)
+    check("fifo: attribution still closes", fifo_m.ticker_attribution_error, 0.0)
+    check("fifo: the mode does not move an unattributed cost",
+          fifo_m.unattributed.other_income, m.unattributed.other_income)
+
+    # ...and under a window, where the split is over the window only.
+    _, _, _, jul = _windowed(JULY)
+    jul_by = {t.ticker: t for t in jul.by_ticker}
+    check("july: AAPL contributes the windowed figures",
+          jul_by["AAPL"].net_contribution, 1463.10)
+    check("july: SPY closed before the window and contributes nothing here",
+          "SPY" in jul_by, False)
+    check("july: unattributed is only the window's account costs",
+          jul.unattributed.other_income, -3.85)        # -5.00 gold +1.15 lending
+    check("july: attribution closes on the windowed net income",
+          jul.ticker_attribution_error, 0.0)
+    check("july: a held position still shows its as-of-end shares",
+          jul_by["TSLA"].shares, 100.0)
+
+    # And the rendered table must add up as printed, same rule as the
+    # reconciliation columns — a split that only balances in the model is no
+    # use to the person reading the page.
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        res = build_dashboard(input_dir=SAMPLE, output_dir=tmp)
+        page = Path(res["output"]).read_text(encoding="utf-8")
+        check("the page carries a by-ticker table", 'id="by-ticker"' in page, True)
+        printed = _ticker_column(page)
+        check("the printed ticker rows sum to the printed total",
+              sum(v for _, v in printed[:-1]), printed[-1][1])
+        check("the printed total is net income", printed[-1][1], m.net_income)
+        check("Unattributed is shown, not folded away",
+              any(n == "Unattributed" for n, _ in printed), True)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1406,6 +1511,7 @@ def run_selftest() -> bool:
     _group_10_store()
     _group_11_window()
     _group_12_window_page()
+    _group_13_by_ticker()
 
     print()
     if FAILS:

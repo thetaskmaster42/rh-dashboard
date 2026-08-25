@@ -90,11 +90,11 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 395 assertions across 12 groups
+uv run ./rh-dashboard selftest                       # 425 assertions across 13 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 12 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 13 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
@@ -228,7 +228,19 @@ metrics asks `positions.py` for the realized figures.
 5. **`metrics.py`** builds the income statement: per-category `cash_total`
    (raw) *and* `income_total` (realized, for lot-matched categories), monthly
    cumulative series driven by realized events rather than raw cash, and
-   `net_income`. It also computes `reconciliation_error` and asserts the
+   `net_income`. `_by_ticker` splits net income per ticker, reading the
+   **Instrument** column rather than parsing descriptions — a dividend row
+   carries its ticker there and an option row carries its *underlying*, which
+   `RealizedEvent.instrument` propagates, so the pattern rules this looked like
+   it would need are unnecessary and cannot mis-fire on a real export. An empty
+   Instrument is an account-level row (margin interest, account fees, Gold,
+   stock lending) and lands in the **Unattributed** bucket, which is named on
+   the page rather than spread across tickers, because spreading it would be a
+   guess. Lot-matched categories are attributed from realized events, never raw
+   cash — attribute the cash and an open position reads as a huge loss. The
+   check is `ticker_attribution_error`: **Σ per-ticker + unattributed ≡ net
+   income**, the same class of guard as the cash reconciliation.
+   It also computes `reconciliation_error` and asserts the
    identity `net income − Δopen equity cost + Δopen options cash + transfers +
    corporate action cash ≡ total cash movement`. It is a **delta** identity:
    cash moved equals income earned, less the change in capital tied up in
