@@ -107,6 +107,10 @@ class Metrics:
     opening_equity_cost_basis: float
     opening_options_net_cash: float
     window: Window | None
+    # The span of the statements themselves. Distinct from `date_range`, which
+    # under a window is the window. The difference is what lets the page say
+    # "matched over all of this, reported over that".
+    full_range: tuple[str, str] | None
     txn_count: int
     date_range: tuple[str, str] | None
     fallback: FallbackSummary
@@ -131,7 +135,7 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
         open_equity_cost_basis=0.0, open_options_net_cash=0.0,
         reconciliation_error=0.0,
         opening_shares=0.0, opening_equity_cost_basis=0.0,
-        opening_options_net_cash=0.0, window=None,
+        opening_options_net_cash=0.0, window=None, full_range=None,
         txn_count=0, date_range=None,
         fallback=FallbackSummary(0, {}), duplicates_removed=duplicates_removed,
         row_errors=row_errors)
@@ -140,7 +144,8 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
 def compute(classified: list[Classified], positions: PositionsResult,
             duplicates_removed: int, row_errors: list[str], *,
             window: Window | None = None,
-            opening: PositionsResult | None = None) -> Metrics:
+            opening: PositionsResult | None = None,
+            full_range: tuple[str, str] | None = None) -> Metrics:
     """Build the income statement.
 
     `classified` is the rows *inside* the window; `positions` is the result
@@ -259,6 +264,7 @@ def compute(classified: list[Classified], positions: PositionsResult,
         opening_equity_cost_basis=open_eq_start,
         opening_options_net_cash=open_opt_start,
         window=window,
+        full_range=full_range,
         txn_count=len(classified),
         date_range=((window.start.isoformat(), window.end.isoformat()) if window
                     else (min(dates).isoformat(), max(dates).isoformat())

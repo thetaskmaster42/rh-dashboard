@@ -20,6 +20,7 @@ The two groups that matter:
 from __future__ import annotations
 
 import base64
+import html as html_mod
 import json
 import re
 import shutil
@@ -43,7 +44,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 11
+GROUPS = 12
 
 
 def _close(got, want, tol) -> bool:
@@ -75,6 +76,25 @@ def check(name, got, want, tol=0.005):
 
 def group(n, title):
     print(f"{n}. {title}")
+
+
+def _calc_column(page: str, heading: str) -> list[tuple[str, float]]:
+    """The (label, amount) pairs of one rendered calculation table.
+
+    Reads the page rather than the model on purpose: a table whose rows do not
+    sum to its own total is wrong in the only way the reader can see, and no
+    assertion about `Metrics` catches that.
+    """
+    block = page.split(heading)[1].split("</table>")[0]
+    out = []
+    for m in re.finditer(
+            r"<td>(?:<span[^>]*></span>)?([^<]*)</td>"
+            r"<td class=\"num[^\"]*\">([^<]*)</td>", block):
+        label = html_mod.unescape(m.group(1)).strip()
+        raw = html_mod.unescape(m.group(2)).replace("$", "").replace(",", "").strip()
+        neg = raw.startswith("-")
+        out.append((label, float(raw.lstrip("+-")) * (-1 if neg else 1)))
+    return out
 
 
 def _strip_generated(html: str) -> str:
@@ -1289,6 +1309,90 @@ def _group_11_window():
           jul.opening_equity_cost_basis)
 
 
+def _group_12_window_page():
+    """The window reaching the page, and the page agreeing with itself."""
+    group(12, "windowed dashboard")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        res = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
+                              filename="july.html",
+                              start=date(2026, 7, 1), end=date(2026, 7, 31))
+        check("windowed build reports the window",
+              res["window"], ("2026-07-01", "2026-07-31"))
+        check("windowed build still reports the statements' own span",
+              res["full_range"], ("2026-06-02", "2026-07-28"))
+        check("windowed build net income", res["net_income"], 1459.25)
+        check("windowed build open shares", res["open_shares"], 370.0)
+        check("windowed build reconciles", res["reconciles"], True)
+
+        html = Path(res["output"]).read_text(encoding="utf-8")
+        check("the page names the window",
+              "Showing 2026-07-01 to 2026-07-31" in html, True)
+        check("the page says lots were matched over the whole history",
+              "2026-06-02 to 2026-07-28" in html, True)
+        check("the page dates its holdings", "Held as of 2026-07-31" in html, True)
+
+        # The reconciliation column has to show the CHANGE across the window,
+        # with both endpoints, or the reader cannot see where it came from.
+        check("the equity row shows both endpoints",
+              "Open equity cost basis $60,405.00 \u2192 $54,855.00" in html, True)
+        # ...and this one is the either-endpoint guard: the short option is
+        # fully closed inside the window, so it ends at zero. Testing only the
+        # end would suppress a row carrying a real -$320.
+        check("a position closed inside the window still gets a row",
+              "Open option cash $320.00 \u2192 $0.00" in html, True)
+        check("the arrow is a character, not an escaped entity",
+              "&amp;rarr;" in html, False)
+
+        # The column must add up *as printed*. Asserting the underlying
+        # identity is not the same thing: reporting levels where the identity
+        # needs deltas leaves every number individually defensible and the
+        # visible column silently wrong, which is exactly the failure a reader
+        # would trust. So parse what was rendered and sum it.
+        rows = _calc_column(html, "Reconciled to cash that moved")
+        check("the cash column has a total row", rows[-1][0].startswith("Total"), True)
+        check("the printed cash rows sum to the printed total",
+              sum(v for _, v in rows[:-1]), rows[-1][1])
+        income = _calc_column(html, "How net income is calculated")
+        check("the printed income rows sum to the printed net income",
+              sum(v for _, v in income[:-1]), income[-1][1])
+        check("both columns agree on net income", income[-1][1], rows[0][1])
+
+        # An unwindowed page must carry none of that chrome.
+        plain = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
+                                filename="plain.html")
+        plain_html = Path(plain["output"]).read_text(encoding="utf-8")
+        check("no window means no window callout",
+              "Showing 2026-07-01" in plain_html, False)
+        check("no window means no delta arrows in the cash column",
+              "\u2192" in plain_html.split("Reconciled to cash that moved")[1]
+              .split("</table>")[0], False)
+        check("the unwindowed result reports no window", plain["window"], None)
+
+        # Open-ended requests resolve against the data rather than being refused.
+        since = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
+                                filename="since.html", start=date(2026, 7, 1))
+        check("--from alone runs to the last row on file",
+              since["window"], ("2026-07-01", "2026-07-28"))
+        check("--from alone reports the same income as the full month",
+              since["net_income"], 1459.25)
+        until = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
+                                filename="until.html", end=date(2026, 6, 30))
+        check("--to alone starts at the first row on file",
+              until["window"], ("2026-06-02", "2026-06-30"))
+        check("--to alone reports june", until["net_income"], 88.91)
+
+        # Whatever the window, the page must still open offline.
+        for name, page in (("windowed", html), ("open-ended", Path(
+                since["output"]).read_text(encoding="utf-8"))):
+            check(f"{name} page makes no network request",
+                  bool(re.search(r"https?://", page)), False)
+            check(f"{name} page links no external script or stylesheet",
+                  ("<script src=" in page or 'rel="stylesheet"' in page), False)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1301,6 +1405,7 @@ def run_selftest() -> bool:
     _group_9_server()
     _group_10_store()
     _group_11_window()
+    _group_12_window_page()
 
     print()
     if FAILS:

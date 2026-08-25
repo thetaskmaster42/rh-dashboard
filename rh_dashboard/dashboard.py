@@ -132,6 +132,8 @@ header .meta { color: var(--text-secondary); font-size: 13px; margin: 0; }
 }
 .card h2 { font-size: 15px; margin: 0 0 2px; }
 .card .sub-head { font-size: 12px; color: var(--text-secondary); margin: 0 0 14px; }
+.table-caption { caption-side: top; text-align: left; font-size: 11.5px;
+  color: var(--text-secondary); padding: 0 0 6px; }
 
 .summary-heroes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
 @media (max-width: 700px) { .summary-heroes { grid-template-columns: 1fr; } }
@@ -477,15 +479,33 @@ def _summary_section(m: Metrics, cost_basis: CostBasis) -> str:
             f"Other (unclassified, {m.other_count})", m.other_income, OTHER_COLOR))
     income_rows.append(_calc_row("Net income", m.net_income, subtotal=True))
 
+    # Under a window the identity needs *deltas*, not levels: what the window
+    # changed about the capital tied up in positions, not what is tied up
+    # overall. Both guards test EITHER endpoint — a position fully closed
+    # inside the window ends at zero, and testing only the end would suppress a
+    # row carrying a real number.
+    eq_start, eq_end = m.opening_equity_cost_basis, m.open_equity_cost_basis
+    opt_start, opt_end = m.opening_options_net_cash, m.open_options_net_cash
+
     cash_rows = [_calc_row("Net income", m.net_income)]
-    if m.open_equity_cost_basis:
+    if eq_start or eq_end:
+        if m.window:
+            label = (f"Open equity cost basis {_money(eq_start)} \u2192 "
+                     f"{_money(eq_end)}")
+        else:
+            label = f"Cash into open equity ({_plural(m.open_shares, 'share')})"
         cash_rows.append(_calc_row(
-            f"Cash into open equity ({_plural(m.open_shares, 'share')})",
-            -m.open_equity_cost_basis, category_color(Category.EQUITY), excluded=True))
-    if abs(m.open_options_net_cash) > 0.005:
-        cash_rows.append(_calc_row("Cash from open options",
-                                    m.open_options_net_cash,
-                                    category_color(Category.OPTIONS), excluded=True))
+            label, -(eq_end - eq_start),
+            category_color(Category.EQUITY), excluded=True))
+    if abs(opt_start) > 0.005 or abs(opt_end) > 0.005:
+        if m.window:
+            label = (f"Open option cash {_money(opt_start)} \u2192 "
+                     f"{_money(opt_end)}")
+        else:
+            label = "Cash from open options"
+        cash_rows.append(_calc_row(
+            label, opt_end - opt_start,
+            category_color(Category.OPTIONS), excluded=True))
     for cat in TRANSFER_CATEGORIES:
         s = m.categories[cat]
         if s.count:
@@ -498,7 +518,19 @@ def _summary_section(m: Metrics, cost_basis: CostBasis) -> str:
     cash_rows.append(_calc_row("Total cash movement", m.total_cash_movement, subtotal=True))
 
     open_note = ""
-    if m.open_equity_cost_basis:
+    if m.window and (eq_start or eq_end):
+        # The excluded figure is now the *change*, so the prose has to describe
+        # the change or it fights the table beside it.
+        moved = eq_end - eq_start
+        direction = ("went into" if moved > 0 else "came back out of")
+        open_note = (
+            f' {_money(abs(moved))} {direction} open equity over this window '
+            f'({_money(eq_start)} at the start, {_money(eq_end)} at the end), '
+            f'and that movement is deliberately <em>not</em> income — it is '
+            f'cash changing form. {_plural(m.open_shares, "share")} were held '
+            f'as of {esc(m.window.end.isoformat())}. See '
+            f'<a href="#open-positions">Open positions</a>.')
+    elif m.open_equity_cost_basis:
         open_note = (
             f' The {_money(m.open_equity_cost_basis)} spent on the '
             f'{_plural(m.open_shares, "share")} still held is deliberately '
@@ -545,6 +577,18 @@ def _summary_section(m: Metrics, cost_basis: CostBasis) -> str:
   </section>"""
 
 
+def _as_of(m: Metrics) -> str:
+    """The date open-position figures are stated as of.
+
+    Under a window that is the window end, not "now" and not the last row on
+    file. Every string on the page that says "still held" has to agree with
+    this one, or the page quietly contradicts itself.
+    """
+    if m.window:
+        return m.window.end.isoformat()
+    return m.date_range[1] if m.date_range else ""
+
+
 def _open_positions_section(m: Metrics, positions: PositionsResult) -> str:
     equity = positions.equity_holdings
     options = positions.option_holdings
@@ -568,6 +612,7 @@ def _open_positions_section(m: Metrics, positions: PositionsResult) -> str:
     if equity:
         equity_table = f"""
     <table class="data">
+      <caption class="table-caption">Held as of {esc(_as_of(m))}</caption>
       <thead><tr>
         <th>Ticker</th><th class="num">Shares held</th><th class="num">Avg cost/share</th>
         <th class="num">Cost basis</th><th>First bought</th>
@@ -718,6 +763,22 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
     date_range = f"{m.date_range[0]} → {m.date_range[1]}" if m.date_range else "—"
 
     callouts = []
+    if m.window:
+        # First, because every other figure on the page is conditioned on it.
+        # The point this has to land: lots were matched over the WHOLE history,
+        # so a position opened before the window reports its true realized
+        # gain, not its full proceeds. Without saying so the reader has no way
+        # to tell this page apart from a naive row filter, which would be wrong.
+        span = (f" Lots were matched over the full statement history "
+                f"({esc(m.full_range[0])} to {esc(m.full_range[1])}), so a "
+                f"position opened before this window reports its true realized "
+                f"gain, not its full proceeds." if m.full_range else "")
+        callouts.append(
+            f"<li><strong>Showing {esc(m.window.label)}.</strong>{span} "
+            f"Open-position figures are as of "
+            f"<strong>{esc(m.window.end.isoformat())}</strong>, and the "
+            f"reconciliation column shows how each moved across the window "
+            f"rather than its total.</li>")
     if m.duplicates_removed:
         callouts.append(
             f"<li><strong>{m.duplicates_removed} duplicate row(s) removed.</strong> The "
