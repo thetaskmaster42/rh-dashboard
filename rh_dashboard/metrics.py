@@ -37,6 +37,7 @@ never at what it is worth today. See the dashboard footer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
                     LOT_MATCHED_CATEGORIES, TRANSFER_CATEGORIES, Category,
@@ -81,6 +82,41 @@ class CategorySummary:
 
 
 @dataclass
+class TickerSummary:
+    """What one ticker contributed to net income, and what is still held in it.
+
+    `ticker` is empty for the **Unattributed** bucket, which is not a rounding
+    device: margin interest, account fees, the Gold subscription and stock
+    lending income are account-level and belong to no ticker. Forcing them onto
+    one would be a guess, and this project does not guess — so they are named
+    and shown, and the identity below still closes.
+
+        sum(net_contribution over every ticker) + unattributed == net_income
+
+    That identity is the check that attribution neither double-counted nor
+    dropped anything, in the same spirit as the cash reconciliation.
+    """
+    ticker: str
+    realized_equity: float
+    realized_options: float
+    dividends: float
+    other_income: float               # every remaining income category
+    shares: float
+    cost_basis: float
+    avg_price: float
+    first_opened: date | None
+
+    @property
+    def net_contribution(self) -> float:
+        return (self.realized_equity + self.realized_options
+                + self.dividends + self.other_income)
+
+    @property
+    def is_unattributed(self) -> bool:
+        return not self.ticker
+
+
+@dataclass
 class FallbackSummary:
     count: int
     by_code: dict[str, int]
@@ -111,6 +147,8 @@ class Metrics:
     # under a window is the window. The difference is what lets the page say
     # "matched over all of this, reported over that".
     full_range: tuple[str, str] | None
+    by_ticker: list[TickerSummary]
+    unattributed: TickerSummary
     txn_count: int
     date_range: tuple[str, str] | None
     fallback: FallbackSummary
@@ -118,11 +156,93 @@ class Metrics:
     row_errors: list[str]
 
     @property
+    def ticker_attribution_error(self) -> float:
+        """Every ticker's contribution plus the account-level bucket, against
+        net income. Non-zero means attribution dropped or double-counted
+        something — the same class of bug the cash reconciliation catches."""
+        return (sum(t.net_contribution for t in self.by_ticker)
+                + self.unattributed.net_contribution) - self.net_income
+
+    @property
     def reconciles(self) -> bool:
         return abs(self.reconciliation_error) < 0.01
 
     def income_of(self, cat: Category) -> float:
         return self.categories[cat].income_total
+
+
+_TICKER_INCOME_CATEGORIES = tuple(
+    c for c in INCOME_CATEGORIES if c not in LOT_MATCHED_CATEGORIES
+) + FALLBACK_CATEGORIES
+
+
+def _by_ticker(classified: list[Classified], positions: PositionsResult
+               ) -> tuple[list[TickerSummary], TickerSummary]:
+    """Split net income by ticker, with everything account-level named separately.
+
+    Attribution reads the **Instrument** column, not the description. A
+    dividend row carries its ticker there (`SPY`, `AAPL`), and so does an
+    option row — where Instrument is the *underlying*, which is exactly the
+    grouping wanted, and which `RealizedEvent.instrument` already propagates.
+    That makes the pattern-matching this was expected to need unnecessary; an
+    empty Instrument is an account-level row and lands in Unattributed on its
+    own, rather than by a rule that could mis-fire on a real export.
+
+    Lot-matched categories come from realized events, never from raw cash —
+    the same rule as everywhere else, or an open position would read as a loss.
+    Transfers and corporate actions are excluded because neither is income.
+    """
+    acc: dict[str, dict] = {}
+
+    def bucket(name: str) -> dict:
+        return acc.setdefault(name, {
+            "realized_equity": 0.0, "realized_options": 0.0,
+            "dividends": 0.0, "other_income": 0.0,
+            "shares": 0.0, "cost_basis": 0.0, "first_opened": None,
+        })
+
+    for e in positions.realized_events:
+        if e.category is Category.EQUITY:
+            bucket(e.instrument.strip())["realized_equity"] += e.amount
+        elif e.category is Category.OPTIONS:
+            bucket(e.instrument.strip())["realized_options"] += e.amount
+
+    for c in classified:
+        if c.category not in _TICKER_INCOME_CATEGORIES:
+            continue
+        b = bucket(c.txn.instrument.strip())
+        key = ("dividends" if c.category is Category.DIVIDENDS_INTEREST
+               else "other_income")
+        b[key] += c.txn.amount
+
+    for h in positions.equity_holdings:
+        b = bucket((h.instrument or h.key).strip())
+        b["shares"] += h.quantity
+        b["cost_basis"] += h.cost_basis
+        if h.first_opened and (b["first_opened"] is None
+                               or h.first_opened < b["first_opened"]):
+            b["first_opened"] = h.first_opened
+
+    def build(name: str, d: dict) -> TickerSummary:
+        return TickerSummary(
+            ticker=name,
+            realized_equity=d["realized_equity"],
+            realized_options=d["realized_options"],
+            dividends=d["dividends"],
+            other_income=d["other_income"],
+            shares=d["shares"],
+            cost_basis=d["cost_basis"],
+            avg_price=(d["cost_basis"] / d["shares"]) if d["shares"] else 0.0,
+            first_opened=d["first_opened"])
+
+    unattributed = build("", acc.pop("", {
+        "realized_equity": 0.0, "realized_options": 0.0, "dividends": 0.0,
+        "other_income": 0.0, "shares": 0.0, "cost_basis": 0.0,
+        "first_opened": None}))
+    rows = [build(name, d) for name, d in acc.items()]
+    # Biggest contributor first; ticker breaks ties so the order is stable.
+    rows.sort(key=lambda t: (-t.net_contribution, t.ticker))
+    return rows, unattributed
 
 
 def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
@@ -136,6 +256,8 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
         reconciliation_error=0.0,
         opening_shares=0.0, opening_equity_cost_basis=0.0,
         opening_options_net_cash=0.0, window=None, full_range=None,
+        by_ticker=[], unattributed=TickerSummary("", 0.0, 0.0, 0.0, 0.0,
+                                                 0.0, 0.0, 0.0, None),
         txn_count=0, date_range=None,
         fallback=FallbackSummary(0, {}), duplicates_removed=duplicates_removed,
         row_errors=row_errors)
@@ -250,6 +372,8 @@ def compute(classified: list[Classified], positions: PositionsResult,
                      + corporate_action_cash)
     reconciliation_error = total_cash_movement - expected_cash
 
+    by_ticker, unattributed = _by_ticker(classified, positions)
+
     return Metrics(
         months=months, categories=categories, net_income=net_income,
         net_income_cumulative=net_income_cumulative,
@@ -265,6 +389,8 @@ def compute(classified: list[Classified], positions: PositionsResult,
         opening_options_net_cash=open_opt_start,
         window=window,
         full_range=full_range,
+        by_ticker=by_ticker,
+        unattributed=unattributed,
         txn_count=len(classified),
         date_range=((window.start.isoformat(), window.end.isoformat()) if window
                     else (min(dates).isoformat(), max(dates).isoformat())

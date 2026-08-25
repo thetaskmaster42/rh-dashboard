@@ -132,6 +132,7 @@ header .meta { color: var(--text-secondary); font-size: 13px; margin: 0; }
 }
 .card h2 { font-size: 15px; margin: 0 0 2px; }
 .card .sub-head { font-size: 12px; color: var(--text-secondary); margin: 0 0 14px; }
+td.muted { color: var(--text-secondary); opacity: .55; }
 .table-caption { caption-side: top; text-align: left; font-size: 11.5px;
   color: var(--text-secondary); padding: 0 0 6px; }
 
@@ -589,6 +590,69 @@ def _as_of(m: Metrics) -> str:
     return m.date_range[1] if m.date_range else ""
 
 
+def _ticker_row(t, is_total: bool = False, label: str | None = None) -> str:
+    name = label if label is not None else (t.ticker or "Unattributed")
+    cls = ' class="subtotal"' if is_total else (
+        ' class="excluded"' if t.is_unattributed else "")
+    held = f"{t.shares:g}" if t.shares else ""
+    avg = _money(t.avg_price) if t.shares else ""
+    def cell(v):
+        return (f'<td class="num {_sign_class(v)}">{_signed_money(v)}</td>'
+                if abs(v) > 0.005 else '<td class="num muted">&mdash;</td>')
+    return (f'<tr{cls}><td class="ticker">{esc(name)}</td>'
+            f'<td class="num">{held}</td><td class="num">{avg}</td>'
+            f'{cell(t.realized_equity)}{cell(t.realized_options)}'
+            f'{cell(t.dividends)}{cell(t.other_income)}'
+            f'<td class="num {_sign_class(t.net_contribution)}">'
+            f'{_signed_money(t.net_contribution)}</td></tr>')
+
+
+def _by_ticker_section(m: Metrics) -> str:
+    """Net income split per ticker, with everything account-level named.
+
+    The Unattributed row is the honest part. Margin interest, account fees, the
+    Gold subscription and stock lending income belong to no ticker, and putting
+    them on one would be a guess. Naming them keeps the column summing to net
+    income, which is what makes the split checkable rather than decorative.
+    """
+    if not m.by_ticker and not m.unattributed.net_contribution:
+        return ""
+
+    rows = [_ticker_row(t) for t in m.by_ticker]
+    if abs(m.unattributed.net_contribution) > 0.005 or m.unattributed.shares:
+        rows.append(_ticker_row(m.unattributed))
+
+    total = sum(t.net_contribution for t in m.by_ticker) + \
+        m.unattributed.net_contribution
+    as_of = _as_of(m)
+    scope = ("in this window" if m.window else "over these statements")
+    return f"""
+  <section class="card" id="by-ticker">
+    <h2>By ticker</h2>
+    <p class="sub-head">What each ticker contributed to net income {scope}, and what is
+      still held in it as of {esc(as_of)}. Equity and Options are realized P&amp;L on
+      closed lots; an open position contributes nothing until it is sold. Account-level
+      costs belong to no ticker and are named <em>Unattributed</em> rather than spread
+      across them &mdash; which is why this column still adds up to net income.</p>
+    <div class="table-scroll">
+    <table class="data">
+      <thead><tr>
+        <th>Ticker</th><th class="num">Shares</th><th class="num">Avg cost</th>
+        <th class="num">Equity</th><th class="num">Options</th>
+        <th class="num">Dividends</th><th class="num">Other</th>
+        <th class="num">Net contribution</th>
+      </tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+      <tfoot><tr class="subtotal">
+        <td>Total</td><td class="num">{m.open_shares:g}</td><td class="num"></td>
+        <td class="num"></td><td class="num"></td><td class="num"></td>
+        <td class="num"></td>
+        <td class="num {_sign_class(total)}">{_signed_money(total)}</td>
+      </tr></tfoot>
+    </table></div>
+  </section>"""
+
+
 def _open_positions_section(m: Metrics, positions: PositionsResult) -> str:
     equity = positions.equity_holdings
     options = positions.option_holdings
@@ -861,6 +925,8 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
   {_summary_section(m, cost_basis)}
 
   {_open_positions_section(m, positions)}
+
+  {_by_ticker_section(m)}
 
   <section class="kpi-row">{"".join(kpis)}</section>
 
