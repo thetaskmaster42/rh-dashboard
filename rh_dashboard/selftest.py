@@ -280,6 +280,36 @@ def _group_3_fifo():
     check("reverse split preserves total basis", h.cost_basis, 3200.00)
     check("reverse split multiplies per-share cost", h.avg_price, 80.00)
 
+    # --- an outgoing corporate-action leg with nothing coming back ---------
+    # A cash merger or a delisting surrenders lots and never returns shares.
+    # The basis has nowhere to go; it must be named, not dropped.
+    orphan = [
+        _trade(1, "Buy", 100, -2405.00, "CCIV"),
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="SXCH",
+                        instrument="CCIV", quantity=100.0, quantity_suffix="S",
+                        amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+    ]
+    r = compute_positions(orphan)
+    check("orphaned corporate-action basis is reported, not dropped",
+          r.unmatched_corporate_action_basis, 2405.00)
+    check("orphaned corporate-action basis raises a warning naming the amount",
+          any("no shares arrived in exchange" in w and "2,405.00" in w
+              for w in r.warnings), True)
+    check("orphaned corporate-action basis names the position that gave it up",
+          any(w.startswith("CCIV:") and "surrendered" in w for w in r.warnings), True)
+    check("nothing is realized by an orphaned corporate action",
+          r.realized(Category.EQUITY), 0.0)
+    check("the surrendered shares are gone from holdings", r.open_shares, 0.0)
+
+    # The mirror case must stay silent: a matched pair distributes its pool in
+    # full, so a well-formed exchange raises no residual and no warning.
+    r = compute_positions(ca)
+    check("a matched corporate action leaves no residual basis",
+          r.unmatched_corporate_action_basis, 0.0)
+    check("a matched corporate action raises no residual warning",
+          any("no shares arrived in exchange" in w for w in r.warnings), False)
+
     # --- an option open past its own expiry is flagged ---------------------
     r = compute_positions([
         _trade(1, "STO", 1, 100.0, "XYZ", "XYZ 1/5/2026 Call $10.00", Category.OPTIONS),
@@ -289,6 +319,43 @@ def _group_3_fifo():
     ])
     check("contract left open past expiry is warned about",
           any("no closing row" in w for w in r.warnings), True)
+
+    # The same contract, reported only as far as 2026-06-30 but with the whole
+    # file available. The closing row exists — it is just dated later — so this
+    # is not missing data and must not be described as though it were. Without
+    # the distinction, every windowed report accuses its own input.
+    later_close = _trade(1, "STO", 1, 100.0, "XYZ",
+                         "XYZ 1/5/2026 Call $10.00", Category.OPTIONS)
+    closing_row = Classified(
+        _txn(activity_date=date(2026, 7, 20), trans_code="BTC", instrument="XYZ",
+             description="XYZ 1/5/2026 Call $10.00", quantity=1.0, amount=-40.0),
+        Category.OPTIONS, "fixture", False)
+    as_of_row = Classified(
+        _txn(activity_date=date(2026, 6, 30), trans_code="Sell", instrument="OTHER",
+             quantity=1.0, amount=10.0), Category.EQUITY, "fixture", False)
+    reported = [later_close, as_of_row]
+    r = compute_positions(reported, full_history=reported + [closing_row])
+    check("a closing row dated after the reported range is not called missing",
+          any("no closing row" in w for w in r.warnings), False)
+    check("a closing row dated after the reported range is named by date",
+          any("2026-07-20" in w and "end of the range being reported" in w
+              for w in r.warnings), True)
+
+    # And with no full history to consult, the old wording is what remains —
+    # the default must behave exactly as it did before the parameter existed.
+    r = compute_positions(reported)
+    check("without full history the missing-closing-row wording is unchanged",
+          any("no closing row" in w for w in r.warnings), True)
+
+    # A contract that has not expired yet at the reported end is simply open.
+    unexpired = [
+        _trade(1, "STO", 1, 100.0, "XYZ", "XYZ 12/18/2026 Call $10.00",
+               Category.OPTIONS),
+        as_of_row,
+    ]
+    r = compute_positions(unexpired, full_history=unexpired)
+    check("a contract not yet expired at the reported end is not flagged",
+          [w for w in r.warnings if "expired" in w], [])
 
     # --- selling more than held is flagged, not silently guessed -----------
     r = compute_positions([
@@ -477,9 +544,11 @@ def _group_7_reconciliation():
     # the identity, spelled out independently of metrics.compute
     rebuilt = (m.net_income - m.open_equity_cost_basis + m.open_options_net_cash
                + m.categories[Category.DEPOSITS].cash_total
-               + m.categories[Category.WITHDRAW].cash_total)
-    check("net income + holdings + transfers == total cash",
+               + m.categories[Category.WITHDRAW].cash_total
+               + m.corporate_action_cash)
+    check("net income + holdings + transfers + CA cash == total cash",
           rebuilt, m.total_cash_movement)
+    check("a share-for-share exchange moves no cash", m.corporate_action_cash, 0.0)
 
     # raw cash across every category must equal the ledger sum, untouched by
     # the income/holding split
@@ -502,6 +571,33 @@ def _group_7_reconciliation():
     for cat in EXPECTED_INCOME:
         check(f"{cat.value} cumulative ends at its income total",
               m.categories[cat].income_cumulative[-1], m.income_of(cat))
+
+    # --- a corporate action that carries cash ------------------------------
+    # Corporate actions reach neither net income nor transfers, so cash on one
+    # used to land nowhere but the error term: a real cash-plus-stock merger
+    # would raise the "something is double-counted" banner while nothing was
+    # actually wrong. The term is named now, so the identity absorbs it.
+    merger = [
+        _trade(1, "Buy", 100, -2405.00, "CCIV"),
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="MRGS",
+                        instrument="CCIV", quantity=100.0, quantity_suffix="S",
+                        amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="MRGS",
+                        instrument="LCID", quantity=100.0, amount=0.0, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+        # the cash half of the consideration
+        Classified(_txn(activity_date=date(2026, 1, 20), trans_code="MRGS",
+                        instrument="CCIV", description="Cash consideration",
+                        quantity=None, amount=250.00, price=None),
+                   Category.CORPORATE_ACTION, "fixture", False),
+    ]
+    pm = compute_positions(merger)
+    mm = compute(merger, pm, 0, [])
+    check("a cash merger's cash is a named term", mm.corporate_action_cash, 250.00)
+    check("a cash merger still reconciles", mm.reconciles, True)
+    check("a cash merger leaves no reconciliation error", mm.reconciliation_error, 0.0)
+    check("a cash merger does not leak into net transfers", mm.net_transfers, 0.0)
 
 
 def _group_8_dashboard():

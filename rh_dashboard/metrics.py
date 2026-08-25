@@ -16,7 +16,15 @@ Two different totals live here and they answer different questions:
 They reconcile exactly, and `compute()` asserts it:
 
     Net Income - open equity cost basis + open options net cash
-               + deposits + withdrawals  ==  total cash movement
+               + deposits + withdrawals + corporate action cash
+               ==  total cash movement
+
+That last term is normally zero: a merger or split moves shares, not money, so
+those rows carry a blank Amount. But a cash-plus-stock merger or cash-in-lieu
+settlement does move money, and corporate actions reach neither Net Income nor
+transfers — so leaving the term out made a true statement about a real export
+fail to reconcile for a reason the banner could not name. It is a named term
+here rather than an assumption nothing checks.
 
 That identity is the proof the split is honest: nothing is double-counted and
 nothing is dropped. If it ever fails, `reconciliation_error` is non-zero and
@@ -86,6 +94,7 @@ class Metrics:
     net_income_cumulative: list[float]
     total_cash_movement: float
     net_transfers: float
+    corporate_action_cash: float       # normally 0.00 — see the module docstring
     other_income: float                # unclassified rows, folded into Net Income
     other_count: int
     open_shares: float
@@ -111,7 +120,8 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
         months=[],
         categories={c: CategorySummary(c, 0.0, 0.0, 0, {}, []) for c in CATEGORY_ORDER},
         net_income=0.0, net_income_cumulative=[], total_cash_movement=0.0,
-        net_transfers=0.0, other_income=0.0, other_count=0, open_shares=0.0,
+        net_transfers=0.0, corporate_action_cash=0.0,
+        other_income=0.0, other_count=0, open_shares=0.0,
         open_equity_cost_basis=0.0, open_options_net_cash=0.0,
         reconciliation_error=0.0, txn_count=0, date_range=None,
         fallback=FallbackSummary(0, {}), duplicates_removed=duplicates_removed,
@@ -179,19 +189,24 @@ def compute(classified: list[Classified], positions: PositionsResult,
 
     total_cash_movement = sum(cash_total.values())
     net_transfers = sum(categories[c].cash_total for c in TRANSFER_CATEGORIES)
+    # Cash-neutral by convention, not by guarantee. Summed explicitly so a
+    # cash merger shifts a named row rather than the error term.
+    corporate_action_cash = cash_total[Category.CORPORATE_ACTION]
 
     # Net Income minus what's parked in open positions plus financing must equal
     # the raw cash total. See the module docstring.
     expected_cash = (net_income
                      - positions.open_equity_cost_basis
                      + positions.open_options_net_cash
-                     + net_transfers)
+                     + net_transfers
+                     + corporate_action_cash)
     reconciliation_error = total_cash_movement - expected_cash
 
     return Metrics(
         months=months, categories=categories, net_income=net_income,
         net_income_cumulative=net_income_cumulative,
         total_cash_movement=total_cash_movement, net_transfers=net_transfers,
+        corporate_action_cash=corporate_action_cash,
         other_income=other_income, other_count=other_count,
         open_shares=positions.open_shares,
         open_equity_cost_basis=positions.open_equity_cost_basis,

@@ -461,6 +461,10 @@ def _summary_section(m: Metrics) -> str:
         if s.count:
             cash_rows.append(_calc_row(cat.value, s.cash_total,
                                         category_color(cat), excluded=True))
+    if abs(m.corporate_action_cash) > 0.005:
+        cash_rows.append(_calc_row(
+            "Corporate action cash", m.corporate_action_cash,
+            category_color(Category.CORPORATE_ACTION), excluded=True))
     cash_rows.append(_calc_row("Total cash movement", m.total_cash_movement, subtotal=True))
 
     open_note = ""
@@ -697,12 +701,18 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
             f"<li><strong>{len(row_errors)} row(s) could not be parsed</strong> and were "
             f"skipped — see the run log for the file and line.</li>")
     if not m.reconciles:
+        cause = ""
+        if positions.unmatched_corporate_action_basis > 0.005:
+            cause = (
+                f" {_money(positions.unmatched_corporate_action_basis)} of it is cost "
+                f"basis surrendered in a corporate action that never reached any "
+                f"incoming shares — see the lot-matching note above.")
         callouts.append(
             f"<li><strong>Reconciliation is off by "
             f"{_money(m.reconciliation_error)}.</strong> Net income plus open-position "
             f"cash plus transfers should equal total cash movement exactly. It doesn't, "
             f"which means something is double-counted — treat these figures as "
-            f"unreliable and report this.</li>")
+            f"unreliable and report this.{cause}</li>")
 
     callout_html = ""
     if callouts:
