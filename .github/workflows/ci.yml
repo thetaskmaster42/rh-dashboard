@@ -56,6 +56,25 @@ jobs:
       - name: Build the sample dashboard
         run: uv run --frozen ./rh-dashboard build -i sample_data -o /tmp/preview
 
+      - name: The page's own JavaScript must parse
+        # Group 14 checks the script structurally — that every element it
+        # looks up is rendered, that the data blocks are valid JSON — but it
+        # cannot tell whether the JavaScript itself is syntactically valid,
+        # because nothing in this project runs JavaScript. The runner has node,
+        # so extract the inline script and parse it. The container does not
+        # have node, which is why this lives here and not in selftest.
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          page = pathlib.Path("/tmp/preview/dashboard.html").read_text(encoding="utf-8")
+          js = [b for a, b in re.findall(r"<script([^>]*)>(.*?)</script>", page, re.S)
+                if 'type="application/json"' not in a]
+          assert len(js) == 1, f"expected one script block, found {len(js)}"
+          pathlib.Path("/tmp/page.js").write_text(js[0], encoding="utf-8")
+          PY
+          node --check /tmp/page.js
+          echo "inline script parses"
+
       - name: The generated page must open offline
         # Group 8 asserts this too; repeated here because it is the project's
         # central promise and worth failing loudly and early on.

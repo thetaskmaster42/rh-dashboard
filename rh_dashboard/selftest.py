@@ -44,7 +44,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 13
+GROUPS = 14
 
 
 def _close(got, want, tol) -> bool:
@@ -1498,6 +1498,131 @@ def _group_13_by_ticker():
         shutil.rmtree(tmp)
 
 
+def _page_scripts(page: str) -> tuple[list[str], list[str]]:
+    """(javascript blocks, json data blocks), refusing anything external."""
+    js, data = [], []
+    for m in re.finditer(r"<script([^>]*)>(.*?)</script>", page, re.S):
+        attrs, body = m.group(1), m.group(2)
+        check("no script block loads an external file", "src=" in attrs, False)
+        (data if 'type="application/json"' in attrs else js).append(body)
+    return js, data
+
+
+def _row_incomes(page: str) -> dict[str, float]:
+    """Per-ticker sum of the data-income the drill-down accumulates."""
+    out: dict[str, float] = {}
+    for m in re.finditer(r'<tr data-key="[^"]*" data-ticker="([^"]*)"[^>]*'
+                         r'data-income="([-0-9.]+)"', page):
+        out[m.group(1)] = out.get(m.group(1), 0.0) + float(m.group(2))
+    return out
+
+
+def _group_14_controls():
+    """The in-page controls, checked structurally — no browser needed.
+
+    A browser is what would really exercise this, and there isn't one here. But
+    most of what can break is static and checkable: JavaScript that references
+    an element the page never renders, a JSON data block that is not valid
+    JSON, a filter whose values do not match the attributes it filters on, or a
+    drill-down whose arithmetic disagrees with the table it was built from.
+    """
+    group(14, "in-page controls")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        res = build_dashboard(input_dir=SAMPLE, output_dir=tmp)
+        page = Path(res["output"]).read_text(encoding="utf-8")
+        _, _, _, _, m = _sample_metrics()
+
+        js, data = _page_scripts(page)
+        check("the page carries exactly one script block", len(js), 1)
+        for block in data:
+            ok = True
+            try:
+                json.loads(block)
+            except ValueError:
+                ok = False
+            check("every embedded chart data block is valid JSON", ok, True)
+
+        # Anything the script looks up by id must actually be rendered, or the
+        # control is dead on arrival and nothing else would say so.
+        source = js[0]
+        for ident in sorted(set(re.findall(r"getElementById\('([^']+)'\)", source))):
+            if ident == "f-outside":
+                continue                      # only rendered under a window
+            check(f"the script's #{ident} exists on the page",
+                  f'id="{ident}"' in page, True)
+
+        check("the category dropdown is present", 'id="f-cat"' in page, True)
+        check("the ticker dropdown is present", 'id="f-ticker"' in page, True)
+        check("no window means no out-of-window toggle",
+              'id="f-outside"' in page, False)
+        check("the legend no longer carries filter state",
+              "data-active" in page, False)
+
+        # Every value the dropdowns offer has to match an attribute on some row,
+        # or selecting it silently empties the table.
+        cats = set(re.findall(r'<select id="f-cat">.*?</select>', page, re.S)[0]
+                   .split('value="')[1:])
+        offered = {c.split('"')[0] for c in cats} - {""}
+        present = set(re.findall(r'<tr data-key="([^"]*)"', page))
+        check("every category the dropdown offers exists on a row",
+              sorted(offered - present), [])
+        tickers = {t.split('"')[0] for t in
+                   re.findall(r'<select id="f-ticker">.*?</select>', page, re.S)[0]
+                   .split('value="')[1:]} - {""}
+        row_tickers = set(re.findall(r'data-ticker="([^"]*)"', page))
+        check("every ticker the dropdown offers exists on a row",
+              sorted(tickers - row_tickers), [])
+
+        # The drill-down accumulates data-income, so its running total IS the
+        # by-ticker figure. Assert the source data agrees rather than trusting
+        # two calculations to stay in step.
+        per_row = _row_incomes(page)
+        for t in m.by_ticker:
+            if t.ticker in per_row:
+                check(f"{t.ticker}: row incomes accumulate to its rollup figure",
+                      per_row[t.ticker], t.net_contribution)
+        check("row incomes across every ticker sum to net income",
+              sum(per_row.values()), m.net_income)
+
+        # --- windowed: the rows behind a reported gain stay reachable -------
+        wres = build_dashboard(input_dir=SAMPLE, output_dir=tmp, filename="w.html",
+                               start=date(2026, 7, 1), end=date(2026, 7, 31))
+        wpage = Path(wres["output"]).read_text(encoding="utf-8")
+        check("a window renders the out-of-window toggle",
+              'id="f-outside"' in wpage, True)
+        check("the heading says how many of how many",
+              "Transactions in window (10 of 22)" in wpage, True)
+        inside = len(re.findall(r'data-in-window="true"', wpage))
+        outside = len(re.findall(r'data-in-window="false"', wpage))
+        check("in-window rows are marked", inside, 10)
+        check("out-of-window rows are kept, not dropped", outside, 12)
+        check("the june purchase behind july's gain is on the page",
+              'data-ticker="AAPL" data-date="2026-06-03"' in wpage, True)
+        check("...and marked as outside the window",
+              bool(re.search(r'data-date="2026-06-03"[^>]*data-in-window="false"',
+                             wpage)), True)
+
+        # Under a window the drill-down must accumulate the WINDOW's figures.
+        wper = _row_incomes(wpage)
+        _, _, _, jul = _windowed(JULY)
+        jul_by = {t.ticker: t for t in jul.by_ticker}
+        check("windowed row incomes accumulate to the windowed rollup",
+              wper["AAPL"], jul_by["AAPL"].net_contribution)
+        check("a row outside the window contributes nothing to this report",
+              wper.get("SPY", 0.0), 0.0)
+        check("windowed row incomes sum to the windowed net income",
+              sum(wper.values()), jul.net_income)
+
+        for name, p_ in (("plain", page), ("windowed", wpage)):
+            check(f"{name} page still makes no network request",
+                  bool(re.search(r"https?://", p_)), False)
+            check(f"{name} page links no external stylesheet",
+                  'rel="stylesheet"' in p_, False)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1512,6 +1637,7 @@ def run_selftest() -> bool:
     _group_11_window()
     _group_12_window_page()
     _group_13_by_ticker()
+    _group_14_controls()
 
     print()
     if FAILS:

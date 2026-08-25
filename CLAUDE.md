@@ -90,11 +90,11 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 425 assertions across 13 groups
+uv run ./rh-dashboard selftest                       # 463 assertions across 14 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 13 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 14 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
@@ -266,7 +266,11 @@ metrics asks `positions.py` for the realized figures.
    categories already spend the categorical palette's validated 8-slot ceiling.
    **`dashboard.py`** assembles the page: Summary (net income + the two-column
    calculation/reconciliation tables), the open-positions table, stat tiles,
-   legend/filter chips, transaction table, the window callout and the
+   the category/ticker dropdowns (`_controls`) — the legend keeps its
+   swatches but **stopped being the filter**, since eight independently
+   toggleable pills had no notion of "all" and no obvious starting state — the
+   by-ticker rollup and its drill-down `<dialog>`, transaction table, the
+   window callout and the
    as-of-date caption (**every "still held" string on the page must agree with
    `_as_of(m)`**, or the page contradicts itself), the cost-basis note (the page
    **states which mode produced it** — two dashboards built from the same
@@ -274,7 +278,20 @@ metrics asks `positions.py` for the realized figures.
    different numbers, and the footer used to claim FIFO unconditionally),
    and the one vanilla-JS block driving
    hover tooltips — no external script, style, or font, so the file works
-   fully offline. **`assets.py`** holds the only binary the page carries: the
+   fully offline. **The drill-down is assembled from rows the page already
+   has**, never duplicated into it at build time: each transaction row carries
+   `data-ticker`, `data-income` and `data-in-window`, and the dialog
+   accumulates `data-income` in date order — so its running total *is* the
+   by-ticker figure by construction rather than by a second calculation that
+   could disagree. `_row_income` is what fills that in: only a **closing** row
+   in a lot-matched category carries income, and it carries realized P&L rather
+   than proceeds; under a window a row outside it contributes nothing
+   **whatever its category**, or June's dividend would accumulate into a July
+   report while June's sale did not. Under a window the table renders *all*
+   rows and marks which fall inside, because hiding the June purchase behind a
+   July sale leaves the reader unable to check the number. Nothing that
+   *counts* comes from those extra rows.
+   **`assets.py`** holds the only binary the page carries: the
    tab favicon, base64 PNG inline, because a linked icon file would be a
    network request and break that guarantee. Two places emit the `<head>` that
    references it — `dashboard.py` and `server.py`'s `_no_data_page` — so a head

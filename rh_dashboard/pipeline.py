@@ -82,9 +82,11 @@ def build_dashboard(input_dir: str | Path = "input",
     metrics = compute(reported, positions, dd.removed, load_result.row_errors,
                       window=window, opening=opening, full_range=full_range)
 
+    # `reported` drives every figure; `classified` is passed so the transaction
+    # table can still show what falls outside the window, marked as such.
     html = build_page(metrics, positions, reported, load_result.files_read,
                       load_result.row_errors, interactive=interactive,
-                      cost_basis=cost_basis)
+                      cost_basis=cost_basis, all_rows=classified)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
