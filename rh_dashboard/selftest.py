@@ -46,15 +46,30 @@ CHECKS = 0
 GROUPS = 11
 
 
+def _close(got, want, tol) -> bool:
+    """Compare with a money tolerance, *including* numbers nested in sequences.
+
+    Comparing a tuple of floats used to fall straight through to `==`, which
+    made any grouped assertion exact by accident. Summing the same ledger in a
+    different order lands a few parts in 1e-12 away — enough for
+    `-24806.839999999997 != -24806.84` to fail on one interpreter and pass on
+    another, which is a property of binary floating point, not of the code
+    under test. Half a cent is the right resolution for every figure here.
+    """
+    if isinstance(want, bool) or isinstance(got, bool):
+        return got == want
+    if isinstance(want, (int, float)) and isinstance(got, (int, float)):
+        return abs(got - want) <= tol
+    if isinstance(want, (list, tuple)) and isinstance(got, (list, tuple)):
+        return len(got) == len(want) and all(
+            _close(g, w, tol) for g, w in zip(got, want))
+    return got == want
+
+
 def check(name, got, want, tol=0.005):
     global CHECKS
     CHECKS += 1
-    if isinstance(want, (int, float)) and isinstance(got, (int, float)) \
-            and not isinstance(want, bool) and not isinstance(got, bool):
-        ok = abs(got - want) <= tol
-    else:
-        ok = got == want
-    if not ok:
+    if not _close(got, want, tol):
         FAILS.append(f"{name}: got {got!r}, expected {want!r}")
 
 
