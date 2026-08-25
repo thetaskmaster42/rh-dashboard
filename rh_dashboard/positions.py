@@ -145,6 +145,10 @@ class PositionsResult:
     open_equity_cost_basis: float
     open_options_net_cash: float
     warnings: list[str]
+    # Cost basis surrendered by a corporate action that never reached any
+    # incoming shares. Non-zero means open positions understate cost by
+    # exactly this much — which is what the reconciliation banner is seeing.
+    unmatched_corporate_action_basis: float = 0.0
 
     def realized(self, cat: Category) -> float:
         return self.realized_by_category.get(cat, 0.0)
@@ -190,7 +194,17 @@ def _phase(c: Classified) -> int:
     return 3
 
 
-def compute_positions(classified: list[Classified]) -> PositionsResult:
+def compute_positions(classified: list[Classified], *,
+                      full_history: list[Classified] | None = None) -> PositionsResult:
+    """Match every closing trade against the lots it closes.
+
+    `classified` is the range being *reported*. `full_history` is every row the
+    statements carry, and is only ever used to tell one thing apart from
+    another in the expiry warning: a contract with no closing row anywhere is a
+    gap in the input, while a contract whose closing row is simply dated after
+    the reported range is not a problem at all. Passing nothing leaves the two
+    the same, which is exactly the unwindowed behaviour.
+    """
     tracked = [c for c in classified
                if c.category in OPENING_CODES or c.category is Category.CORPORATE_ACTION]
     tracked.sort(key=lambda c: (c.txn.activity_date, _phase(c),
@@ -200,6 +214,10 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
     # carried onto whatever shares arrive in exchange the same day.
     ca_basis_pool: dict[date, float] = {}
     ca_incoming_qty: dict[date, float] = {}
+    # What actually reached incoming shares, and which positions gave it up —
+    # so an undistributed remainder can be named rather than just vanishing.
+    ca_basis_consumed: dict[date, float] = {}
+    ca_basis_sources: dict[date, list[str]] = {}
     for c in tracked:
         if c.category is Category.CORPORATE_ACTION and not c.txn.shares_removed:
             if c.txn.quantity:
@@ -255,6 +273,8 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
                     if lot.quantity <= 1e-9:
                         book["lots"].popleft()
                 ca_basis_pool[d] = ca_basis_pool.get(d, 0.0) + removed_basis
+                if removed_basis > 1e-9:
+                    ca_basis_sources.setdefault(d, []).append(key)
                 if remaining > 1e-9:
                     warnings.append(
                         f"{key}: corporate action on {d.isoformat()} removed {remaining:g} "
@@ -269,6 +289,7 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
                 share = (qty / total_in) if total_in > 1e-9 else 1.0
                 basis = pool * share
                 book["lots"].append(Lot(qty, -basis / qty if qty else 0.0, d))
+                ca_basis_consumed[d] = ca_basis_consumed.get(d, 0.0) + basis
                 if pool <= 1e-9:
                     warnings.append(
                         f"{key}: received {qty:g} share(s) via a corporate action on "
@@ -317,6 +338,25 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
             f"an opening nor a closing code for {cat.value}; its {_money(txn.amount)} "
             f"is counted as realised directly")
 
+    # Surrendered basis reaches the replacement shares only if an incoming leg
+    # arrives the same day. A cash merger, a delisting, or an incoming leg that
+    # lands in a later statement leaves the pool with nowhere to go. Dropping it
+    # silently understates open cost by exactly that amount, which surfaces much
+    # later as a reconciliation banner with no stated cause — so state the cause.
+    unmatched_ca_basis = 0.0
+    for d, pool in sorted(ca_basis_pool.items()):
+        residual = pool - ca_basis_consumed.get(d, 0.0)
+        if residual <= 1e-9:
+            continue
+        unmatched_ca_basis += residual
+        names = ", ".join(ca_basis_sources.get(d, ())) or "(unknown position)"
+        warnings.append(
+            f"{names}: corporate action on {d.isoformat()} surrendered "
+            f"{_money(residual)} of cost basis but no shares arrived in exchange that "
+            f"day — the incoming leg is missing from these statements, or the position "
+            f"was closed out for cash. That basis is not carried forward, so open "
+            f"positions understate cost by {_money(residual)}")
+
     holdings: list[Holding] = []
     open_shares = open_equity_cost = open_options_cash = 0.0
     for key, book in books.items():
@@ -336,22 +376,48 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
         else:
             open_options_cash += net_cash
 
-    # An option still open past its own expiration date means the statements
-    # are missing its closing row — exactly the failure that leaves a
-    # long-dead contract sitting in "open positions". Say so rather than
-    # presenting it as a live holding.
-    last_activity = max((c.txn.activity_date for c in classified), default=None)
-    if last_activity:
+    # An option still open past its own expiration date usually means the
+    # statements are missing its closing row — exactly the failure that leaves a
+    # long-dead contract sitting in "open positions". But "past its expiration"
+    # has to be judged against the end of the range being *reported*, not
+    # against the last row on file: a contract that has not expired yet at the
+    # reported end is simply an open position, and one whose closing row is
+    # merely dated later is not a gap in the input at all. Both of those read as
+    # missing data if the two dates are conflated, so keep them apart.
+    as_of = max((c.txn.activity_date for c in classified), default=None)
+    closes_after: dict[str, date] = {}
+    if full_history is not None and as_of is not None:
+        for c in full_history:
+            if c.category is not Category.OPTIONS:
+                continue
+            if c.txn.trans_code.strip().upper() not in CLOSING_CODES[Category.OPTIONS]:
+                continue
+            if c.txn.activity_date <= as_of:
+                continue
+            k = _position_key(c)
+            if k not in closes_after or c.txn.activity_date < closes_after[k]:
+                closes_after[k] = c.txn.activity_date
+    if as_of:
         for h in holdings:
             if h.category is not Category.OPTIONS:
                 continue
             exp = contract_expiry(h.key)
-            if exp and exp < last_activity:
+            if not (exp and exp < as_of):
+                continue
+            amount = _money(h.net_credit or -h.cost_basis)
+            closed = closes_after.get(h.key)
+            if closed:
+                warnings.append(
+                    f"{h.key}: expired {exp.isoformat()}, and its closing row is dated "
+                    f"{closed.isoformat()} — after {as_of.isoformat()}, the end of the "
+                    f"range being reported. It is correctly shown as open as of that "
+                    f"date, and its {amount} is realised later, outside this range")
+            else:
                 warnings.append(
                     f"{h.key}: expired {exp.isoformat()} but no closing row (OEXP/OASGN/"
                     f"STC/BTC) appears in these statements, so it is still counted as "
-                    f"open — its {_money(h.net_credit or -h.cost_basis)} has not been "
-                    f"realised. The closing row is probably outside the input window")
+                    f"open — its {amount} has not been realised. The closing row is "
+                    f"probably outside the input window")
 
     holdings.sort(key=lambda h: (h.category.value, h.key))
     realized_events.sort(key=lambda e: e.activity_date)
@@ -364,6 +430,7 @@ def compute_positions(classified: list[Classified]) -> PositionsResult:
         open_equity_cost_basis=open_equity_cost,
         open_options_net_cash=open_options_cash,
         warnings=warnings,
+        unmatched_corporate_action_basis=unmatched_ca_basis,
     )
 
 

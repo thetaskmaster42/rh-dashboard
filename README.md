@@ -18,7 +18,7 @@ offline, because the input is real account activity.
 ./rh-dashboard build              # reads input/*.csv, writes output/dashboard.html
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
-./rh-dashboard selftest           # 235 assertions across 9 groups
+./rh-dashboard selftest           # 266 assertions across 9 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
