@@ -89,11 +89,11 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build --filename jan.html             # rename the output file
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
-uv run ./rh-dashboard selftest                       # 318 assertions across 10 groups
+uv run ./rh-dashboard selftest                       # 369 assertions across 11 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 10 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 11 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
@@ -199,6 +199,19 @@ metrics asks `positions.py` for the realized figures.
      tells "no closing row exists anywhere" (a real gap) apart from "the
      closing row is simply dated later" (not a problem at all). Passing
      nothing leaves both the same, which is the unwindowed behaviour.
+   - **A window never changes how lots are matched — only what is reported.**
+     `compute_windowed(classified, window)` runs the engine twice: once over
+     `activity_date <= end` (holdings and basis **as of the window end**, every
+     pre-window lot at its real cost) and once over `< start` (the state the
+     window opened with). `PositionsResult.windowed(start)` then filters the
+     realized events, leaving holdings alone because they are already as-of-end.
+     Slicing rows *before* matching is the bug this exists to prevent: on
+     `sample_data` a July-only match turns AAPL's real `+1,250` into `+9,500`
+     of bare proceeds plus an oversell warning it caused itself. `windowed`
+     takes `start` alone on purpose — an `end` argument would let a caller pair
+     holdings from one date with income from another. `Window` keys on
+     `activity_date`, never process/settle, or a same-day corporate-action pair
+     splits across the boundary and the surrendered basis vanishes.
    - **Cost basis is selectable and `CostBasis.AVERAGE` is the default.**
      Average cost blends every open equity lot into one running lot; FIFO
      queues them. The entire difference lives in `_absorb` — under averaging a
@@ -215,8 +228,17 @@ metrics asks `positions.py` for the realized figures.
    (raw) *and* `income_total` (realized, for lot-matched categories), monthly
    cumulative series driven by realized events rather than raw cash, and
    `net_income`. It also computes `reconciliation_error` and asserts the
-   identity `net income − open position cash + transfers + corporate action
-   cash ≡ total cash movement`. That last term is normally zero — a merger
+   identity `net income − Δopen equity cost + Δopen options cash + transfers +
+   corporate action cash ≡ total cash movement`. It is a **delta** identity:
+   cash moved equals income earned, less the change in capital tied up in
+   positions, plus financing. `compute(..., window=, opening=)` are keyword-only
+   and `opening` is a whole `PositionsResult` so the pair cannot be transposed;
+   without a window the opening terms are zero and the formula collapses to the
+   original exactly, with no `if window is None` branch in the arithmetic.
+   `months` come from the window rather than from the rows, so a quiet first or
+   last month cannot shrink the axis, and `_empty` is suppressed under a window
+   because "nothing happened this period, here is what you were holding" is a
+   legitimate report that zeros would misstate. That last term is normally zero — a merger
    moves shares, not money — but a cash-plus-stock merger does move cash and
    reaches neither income nor transfers, so leaving it implicit made a correct
    run fail to reconcile for a reason the banner could not name. **If you

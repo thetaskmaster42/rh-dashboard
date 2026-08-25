@@ -34,27 +34,42 @@ from .categorize import categorize, categorize_all
 from .dedupe import dedupe
 from .loader import LoadError, load_file, load_folder
 from .metrics import compute
-from .model import Category, Classified, CostBasis, Transaction
+from .model import Category, Classified, CostBasis, Transaction, Window
 from .pipeline import build_dashboard
-from .positions import compute_positions, normalise_contract
+from .positions import compute_positions, compute_windowed, normalise_contract
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 10
+GROUPS = 11
+
+
+def _close(got, want, tol) -> bool:
+    """Compare with a money tolerance, *including* numbers nested in sequences.
+
+    Comparing a tuple of floats used to fall straight through to `==`, which
+    made any grouped assertion exact by accident. Summing the same ledger in a
+    different order lands a few parts in 1e-12 away — enough for
+    `-24806.839999999997 != -24806.84` to fail on one interpreter and pass on
+    another, which is a property of binary floating point, not of the code
+    under test. Half a cent is the right resolution for every figure here.
+    """
+    if isinstance(want, bool) or isinstance(got, bool):
+        return got == want
+    if isinstance(want, (int, float)) and isinstance(got, (int, float)):
+        return abs(got - want) <= tol
+    if isinstance(want, (list, tuple)) and isinstance(got, (list, tuple)):
+        return len(got) == len(want) and all(
+            _close(g, w, tol) for g, w in zip(got, want))
+    return got == want
 
 
 def check(name, got, want, tol=0.005):
     global CHECKS
     CHECKS += 1
-    if isinstance(want, (int, float)) and isinstance(got, (int, float)) \
-            and not isinstance(want, bool) and not isinstance(got, bool):
-        ok = abs(got - want) <= tol
-    else:
-        ok = got == want
-    if not ok:
+    if not _close(got, want, tol):
         FAILS.append(f"{name}: got {got!r}, expected {want!r}")
 
 
@@ -1117,6 +1132,163 @@ def _group_10_store():
         con.close()
 
 
+# Hand-derived from sample_data for the two calendar-month windows. Worked out
+# from the CSVs, not read off the engine:
+#
+#   JUNE  cash  -25000-18000-15000-5500+5600-2405 (equity) +320 (STO)
+#               +30000 (ACH) +8.75 -2.50 -12.34 -5.00        -> -29,996.09
+#         realized  SPY (560-550)*10 = +100 ; the STO only opens -> +100
+#         net       100 + 8.75 - 2.50 - 12.34 - 5.00          ->     +88.91
+#         open      TSLA 25,000 + AAPL 200*165 = 33,000 + CCIV 2,405
+#                                                  = 60,405 (400 shares)
+#         options   the STO's +320 is still open
+#
+#   JULY  cash  +9500 -110 +3.10 -2000 +500 -2700 -5.00 +1.15 ->  +5,189.25
+#         realized  AAPL (190-165)*50 = +1,250 ; BTC closes the STO -> +210
+#         net       1250 + 210 + 3.10 - 5.00 + 1.15           ->  +1,459.25
+#         open      TSLA 25,000 + AAPL 150*165 = 24,750 + LCID 2,405
+#                            + NVDA 2,700 = 54,855 (370 shares)
+#
+# The delta identity, spelled out for each:
+#   JUNE     88.91 - (60,405 - 0)      + (320 - 0)   + 30,000  = -29,996.09
+#   JULY  1,459.25 - (54,855 - 60,405) + (0 - 320)   -  1,500  =  +5,189.25
+#
+# And the two windows must sum to the full range, on both income and cash.
+JUNE = Window(date(2026, 6, 1), date(2026, 6, 30))
+JULY = Window(date(2026, 7, 1), date(2026, 7, 31))
+
+
+def _windowed(window: Window, cost_basis=CostBasis.AVERAGE):
+    """The three-pass windowed report over sample_data."""
+    lr = load_folder(SAMPLE)
+    dd = dedupe(lr.transactions)
+    cls = categorize_all(dd.kept)
+    reported, opening = compute_windowed(cls, window, cost_basis=cost_basis)
+    m = compute([c for c in cls if window.contains(c.txn.activity_date)],
+                reported, dd.removed, lr.row_errors,
+                window=window, opening=opening)
+    return cls, reported, opening, m
+
+
+def _group_11_window():
+    group(11, "date windows")
+
+    # --- the whole point: slicing rows first would destroy cost basis -------
+    # AAPL is bought in June and part-sold in July. Match the July rows alone
+    # and the +1,250 gain becomes +9,500 of pure proceeds.
+    lr = load_folder(SAMPLE)
+    cls = categorize_all(dedupe(lr.transactions).kept)
+    naive = compute_positions([c for c in cls if JULY.contains(c.txn.activity_date)])
+    check("slicing rows before matching invents a gain",
+          naive.realized(Category.EQUITY), 9500.0)
+    check("...and complains about an oversell it caused itself",
+          any("more unit(s)" in w for w in naive.warnings), True)
+
+    _, jun_pos, jun_open, jun = _windowed(JUNE)
+    _, jul_pos, jul_open, jul = _windowed(JULY)
+
+    check("june: net income", jun.net_income, 88.91)
+    check("june: total cash", jun.total_cash_movement, -29996.09)
+    check("june: equity realized", jun_pos.realized(Category.EQUITY), 100.00)
+    check("june: the STO only opened, so options realized nothing",
+          jun_pos.realized(Category.OPTIONS), 0.0)
+    check("june: opening basis is zero", jun.opening_equity_cost_basis, 0.0)
+    check("june: closing basis", jun.open_equity_cost_basis, 60405.00)
+    check("june: shares at window end", jun.open_shares, 400.0)
+    check("june: the open short option is still carried",
+          jun.open_options_net_cash, 320.00)
+    check("june: reconciles", jun.reconciles, True)
+    check("june: reconciliation error", jun.reconciliation_error, 0.0)
+
+    check("july: net income", jul.net_income, 1459.25)
+    check("july: total cash", jul.total_cash_movement, 5189.25)
+    check("july: equity realized against the pre-window lots",
+          jul_pos.realized(Category.EQUITY), 1250.00)
+    check("july: the BTC closes June's short for its full credit",
+          jul_pos.realized(Category.OPTIONS), 210.00)
+    check("july: opening basis is june's closing basis",
+          jul.opening_equity_cost_basis, jun.open_equity_cost_basis)
+    check("july: closing basis", jul.open_equity_cost_basis, 54855.00)
+    check("july: shares at window end", jul.open_shares, 370.0)
+    check("july: reconciles", jul.reconciles, True)
+    check("july: reconciliation error", jul.reconciliation_error, 0.0)
+
+    # --- as-of semantics: the inverse of what the full range reports -------
+    # In June the exchange has not happened yet. This is the cleanest proof the
+    # as-of view is real rather than a filtered final state.
+    jun_held = {h.instrument for h in jun_pos.equity_holdings}
+    check("june: CCIV is still held", "CCIV" in jun_held, True)
+    check("june: LCID does not exist yet", "LCID" in jun_held, False)
+    jul_held = {h.instrument for h in jul_pos.equity_holdings}
+    check("july: CCIV is gone", "CCIV" in jul_held, False)
+    check("july: LCID holds its basis", "LCID" in jul_held, True)
+
+    # --- additivity: disjoint windows must sum to the range containing them -
+    _, _, _, full = _windowed(Window(date(2026, 1, 1), date(2026, 12, 31)))
+    check("windows are additive on income",
+          jun.net_income + jul.net_income, full.net_income)
+    check("windows are additive on cash",
+          jun.total_cash_movement + jul.total_cash_movement,
+          full.total_cash_movement)
+    check("a full-range window matches the unwindowed figures",
+          (full.net_income, full.total_cash_movement, full.open_shares),
+          (EXPECTED_NET_INCOME, EXPECTED_TOTAL_CASH, EXPECTED_OPEN_SHARES))
+    check("a full-range window opens at zero",
+          (full.opening_equity_cost_basis, full.opening_options_net_cash), (0.0, 0.0))
+
+    # --- months come from the window, not from the rows --------------------
+    check("june months", jun.months, ["2026-06"])
+    check("july months", jul.months, ["2026-07"])
+    check("the reported range is the window itself",
+          jul.date_range, ("2026-07-01", "2026-07-31"))
+    check("cumulative net income lands on the windowed total",
+          jul.net_income_cumulative[-1], jul.net_income)
+
+    # --- an empty window is a legitimate report, not zeros ------------------
+    _, quiet_pos, _, quiet = _windowed(Window(date(2026, 7, 1), date(2026, 7, 4)))
+    check("empty window: no rows", quiet.txn_count, 0)
+    check("empty window: no income", quiet.net_income, 0.0)
+    check("empty window: no cash", quiet.total_cash_movement, 0.0)
+    check("empty window: still reports what was being held",
+          quiet.open_shares, 400.0)
+    check("empty window: ...at its real cost, not zero",
+          quiet.open_equity_cost_basis, 60405.00)
+    check("empty window: the month axis survives", quiet.months, ["2026-07"])
+    check("empty window: reconciles", quiet.reconciles, True)
+
+    # --- one day, the day the sale happens ---------------------------------
+    _, day_pos, day_open, day = _windowed(Window(date(2026, 7, 5), date(2026, 7, 5)))
+    check("one day: income is the realized gain", day.net_income, 1250.00)
+    check("one day: cash is the full proceeds", day.total_cash_movement, 9500.00)
+    check("one day: basis falls by the cost of what was sold",
+          day.open_equity_cost_basis - day.opening_equity_cost_basis, -8250.00)
+    check("one day: reconciles across the boundary", day.reconciles, True)
+
+    # --- the prefix property the whole design rests on ---------------------
+    # The fold is a deterministic left-to-right pass, so the events of a
+    # baseline run must BE the pre-window prefix of the as-of-end run. If this
+    # ever stopped holding, every windowed figure would be quietly wrong.
+    as_of_all = compute_positions([c for c in cls if JULY.as_of(c.txn.activity_date)])
+    prefix = [(e.activity_date, e.key, round(e.amount, 6))
+              for e in as_of_all.realized_events if e.activity_date < JULY.start]
+    baseline = [(e.activity_date, e.key, round(e.amount, 6))
+                for e in jul_open.realized_events]
+    check("baseline events are exactly the pre-window prefix", baseline, prefix)
+
+    # --- cost basis and windows compose ------------------------------------
+    _, jul_f_pos, _, jul_f = _windowed(JULY, cost_basis=CostBasis.FIFO)
+    check("july under fifo: equity realized",
+          jul_f_pos.realized(Category.EQUITY), 500.00)
+    check("july under fifo: net income", jul_f.net_income, 709.25)
+    check("july under fifo: closing basis", jul_f.open_equity_cost_basis, 54105.00)
+    check("july under fifo: same cash as average cost",
+          jul_f.total_cash_movement, jul.total_cash_movement)
+    check("july under fifo: reconciles", jul_f.reconciles, True)
+    check("both modes open june at the same basis, nothing having been sold",
+          _windowed(JULY, cost_basis=CostBasis.FIFO)[3].opening_equity_cost_basis,
+          jul.opening_equity_cost_basis)
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1128,6 +1300,7 @@ def run_selftest() -> bool:
     _group_8_dashboard()
     _group_9_server()
     _group_10_store()
+    _group_11_window()
 
     print()
     if FAILS:

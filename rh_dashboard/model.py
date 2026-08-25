@@ -56,6 +56,50 @@ class Category(str, Enum):
         return self.value
 
 
+@dataclass(frozen=True)
+class Window:
+    """An inclusive date range to *report* over.
+
+    A window never changes how lots are matched — only which results are shown.
+    Slicing rows to the window and then matching would destroy cost basis: in
+    `sample_data` AAPL is bought in June and part-sold in July, so a July-only
+    match turns a real +$1,250 gain into a +$9,500 fiction plus a spurious
+    oversell warning. Lots are always matched over full history; the window
+    selects what is reported and as of when.
+
+    **Both ends are inclusive, and both key on `activity_date`** — the same
+    field the sort key and `_phase` use. Filtering on `process_date` or
+    `settle_date` would split a same-day corporate-action pair across the
+    boundary, and since the surrendered basis is handed over by date, the
+    outgoing leg's cost would land outside the window and simply vanish.
+    """
+    start: date
+    end: date
+
+    def __post_init__(self) -> None:
+        if self.end < self.start:
+            raise ValueError(
+                f"window ends before it starts: {self.start.isoformat()} "
+                f"to {self.end.isoformat()}")
+
+    def contains(self, d: date) -> bool:
+        return self.start <= d <= self.end
+
+    def before(self, d: date) -> bool:
+        """True for a date strictly earlier than the window — the baseline
+        pass, whose final state is the window's opening state."""
+        return d < self.start
+
+    def as_of(self, d: date) -> bool:
+        """True for anything at or before the window end — the as-of-end pass,
+        which carries every pre-window lot at its real cost."""
+        return d <= self.end
+
+    @property
+    def label(self) -> str:
+        return f"{self.start.isoformat()} to {self.end.isoformat()}"
+
+
 class CostBasis(str, Enum):
     """Which open lot a sale consumes.
 

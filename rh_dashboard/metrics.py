@@ -40,7 +40,7 @@ from dataclasses import dataclass
 
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
                     LOT_MATCHED_CATEGORIES, TRANSFER_CATEGORIES, Category,
-                    Classified)
+                    Classified, Window)
 from .positions import PositionsResult
 
 
@@ -101,6 +101,12 @@ class Metrics:
     open_equity_cost_basis: float
     open_options_net_cash: float
     reconciliation_error: float        # ~0 unless something is double-counted
+    # The position state the window opened with. All zero without a window,
+    # which is what makes the delta identity collapse to the unwindowed one.
+    opening_shares: float
+    opening_equity_cost_basis: float
+    opening_options_net_cash: float
+    window: Window | None
     txn_count: int
     date_range: tuple[str, str] | None
     fallback: FallbackSummary
@@ -123,18 +129,48 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
         net_transfers=0.0, corporate_action_cash=0.0,
         other_income=0.0, other_count=0, open_shares=0.0,
         open_equity_cost_basis=0.0, open_options_net_cash=0.0,
-        reconciliation_error=0.0, txn_count=0, date_range=None,
+        reconciliation_error=0.0,
+        opening_shares=0.0, opening_equity_cost_basis=0.0,
+        opening_options_net_cash=0.0, window=None,
+        txn_count=0, date_range=None,
         fallback=FallbackSummary(0, {}), duplicates_removed=duplicates_removed,
         row_errors=row_errors)
 
 
 def compute(classified: list[Classified], positions: PositionsResult,
-            duplicates_removed: int, row_errors: list[str]) -> Metrics:
-    if not classified:
+            duplicates_removed: int, row_errors: list[str], *,
+            window: Window | None = None,
+            opening: PositionsResult | None = None) -> Metrics:
+    """Build the income statement.
+
+    `classified` is the rows *inside* the window; `positions` is the result
+    matched over full history, reported as of the window end and filtered to
+    the window with `PositionsResult.windowed`. `opening` is the same engine run
+    over everything strictly before the window — its final state is the state
+    this window opened with.
+
+    Both are keyword-only and `opening` is a whole `PositionsResult` rather than
+    two loose floats, so the pair cannot be transposed and the opening share
+    count is available for display.
+
+    With no window the opening state is all zeros and every formula below
+    collapses to exactly what it was before windows existed — there is no
+    `if window is None` branch in the arithmetic.
+    """
+    # A window with nothing in it is a legitimate report — "nothing happened
+    # this period, here is what you were holding" — and _empty would answer it
+    # with zeros for holdings that really are still there.
+    if not classified and window is None:
         return _empty(duplicates_removed, row_errors)
 
     dates = [c.txn.activity_date for c in classified]
-    months = _month_range(month_key(min(dates)), month_key(max(dates)))
+    if window is not None:
+        # Derived from the window, not from the rows: a quiet first or last
+        # month would otherwise shrink the axis and make two reports over the
+        # same period incomparable.
+        months = _month_range(month_key(window.start), month_key(window.end))
+    else:
+        months = _month_range(month_key(min(dates)), month_key(max(dates)))
 
     cash_total: dict[Category, float] = {c: 0.0 for c in CATEGORY_ORDER}
     counts: dict[Category, int] = {c: 0 for c in CATEGORY_ORDER}
@@ -187,6 +223,10 @@ def compute(classified: list[Classified], positions: PositionsResult,
             sum(categories[c].income_cumulative[i] for c in INCOME_CATEGORIES)
             + sum(categories[c].income_cumulative[i] for c in FALLBACK_CATEGORIES))
 
+    open_eq_start = opening.open_equity_cost_basis if opening else 0.0
+    open_opt_start = opening.open_options_net_cash if opening else 0.0
+    open_shares_start = opening.open_shares if opening else 0.0
+
     total_cash_movement = sum(cash_total.values())
     net_transfers = sum(categories[c].cash_total for c in TRANSFER_CATEGORIES)
     # Cash-neutral by convention, not by guarantee. Summed explicitly so a
@@ -195,9 +235,12 @@ def compute(classified: list[Classified], positions: PositionsResult,
 
     # Net Income minus what's parked in open positions plus financing must equal
     # the raw cash total. See the module docstring.
+    # A *delta* identity: cash that moved equals income earned, less the change
+    # in capital tied up in positions, plus financing. Without a window the
+    # opening terms are zero and this is the original identity unchanged.
     expected_cash = (net_income
-                     - positions.open_equity_cost_basis
-                     + positions.open_options_net_cash
+                     - (positions.open_equity_cost_basis - open_eq_start)
+                     + (positions.open_options_net_cash - open_opt_start)
                      + net_transfers
                      + corporate_action_cash)
     reconciliation_error = total_cash_movement - expected_cash
@@ -211,8 +254,15 @@ def compute(classified: list[Classified], positions: PositionsResult,
         open_shares=positions.open_shares,
         open_equity_cost_basis=positions.open_equity_cost_basis,
         open_options_net_cash=positions.open_options_net_cash,
-        reconciliation_error=reconciliation_error, txn_count=len(classified),
-        date_range=(min(dates).isoformat(), max(dates).isoformat()),
+        reconciliation_error=reconciliation_error,
+        opening_shares=open_shares_start,
+        opening_equity_cost_basis=open_eq_start,
+        opening_options_net_cash=open_opt_start,
+        window=window,
+        txn_count=len(classified),
+        date_range=((window.start.isoformat(), window.end.isoformat()) if window
+                    else (min(dates).isoformat(), max(dates).isoformat())
+                    if dates else None),
         fallback=FallbackSummary(fallback_count,
                                  dict(sorted(fallback_codes.items(), key=lambda kv: -kv[1]))),
         duplicates_removed=duplicates_removed, row_errors=row_errors)
