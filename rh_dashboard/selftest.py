@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import tempfile
 import threading
@@ -33,7 +34,7 @@ from .categorize import categorize, categorize_all
 from .dedupe import dedupe
 from .loader import LoadError, load_file, load_folder
 from .metrics import compute
-from .model import Category, Classified, Transaction
+from .model import Category, Classified, CostBasis, Transaction
 from .pipeline import build_dashboard
 from .positions import compute_positions, normalise_contract
 
@@ -59,6 +60,11 @@ def check(name, got, want, tol=0.005):
 
 def group(n, title):
     print(f"{n}. {title}")
+
+
+def _strip_generated(html: str) -> str:
+    """Drop the build timestamp so two renders can be compared."""
+    return re.sub(r"Generated [^<]*", "", html)
 
 
 def _txn(**kw) -> Transaction:
@@ -166,19 +172,87 @@ def _group_3_fifo():
     check("closed: nothing left open", r.open_shares, 0.0)
     check("closed: no holding row", len(r.equity_holdings), 0)
 
-    # --- FIFO order: oldest lot consumed first ----------------------------
-    r = compute_positions([
-        _trade(1, "Buy", 50, -500.0, "FIFO"),         # 50 @ 10  (oldest)
-        _trade(2, "Buy", 50, -1000.0, "FIFO"),        # 50 @ 20
-        _trade(3, "Sell", 60, 1800.0, "FIFO"),        # 60 @ 30
-    ])
+    # --- two lots, one sale: the whole point of the cost-basis setting -----
+    # This is the only shape where the two modes can disagree, and nothing in
+    # sample_data has it — no ticker there has two buys before a sell, so the
+    # fixture cannot tell the modes apart. These assertions are what make the
+    # setting testable at all.
+    multi_lot = [
+        _trade(1, "Buy", 50, -500.0, "MULTI"),        # 50 @ 10  (oldest)
+        _trade(2, "Buy", 50, -1000.0, "MULTI"),       # 50 @ 20
+        _trade(3, "Sell", 60, 1800.0, "MULTI"),       # 60 @ 30
+    ]
+
     # 50 from the $10 lot -> (30-10)*50 = 1000; 10 from the $20 lot -> (30-20)*10 = 100
+    r = compute_positions(multi_lot, cost_basis=CostBasis.FIFO)
     check("fifo: oldest lot matched first", r.realized(Category.EQUITY), 1100.0)
     check("fifo: 40 shares left", r.open_shares, 40.0)
     check("fifo: remainder priced at the newer lot",
           r.open_equity_cost_basis, 800.0)             # 40 * 20
     check("fifo: cash identity holds",
           r.realized(Category.EQUITY) - r.open_equity_cost_basis, 300.0)  # -500-1000+1800
+
+    # blended cost is (50*10 + 50*20) / 100 = 15, so (30-15)*60 = 900
+    r = compute_positions(multi_lot, cost_basis=CostBasis.AVERAGE)
+    check("average: sale realizes against the blend",
+          r.realized(Category.EQUITY), 900.0)
+    check("average: 40 shares left", r.open_shares, 40.0)
+    check("average: remainder priced at the blend",
+          r.open_equity_cost_basis, 600.0)             # 40 * 15
+    check("average: per-share cost is the blend",
+          r.equity_holdings[0].avg_price, 15.0)
+    check("average: cash identity holds",
+          r.realized(Category.EQUITY) - r.open_equity_cost_basis, 300.0)
+    check("average: the book collapses to a single lot",
+          len(r.equity_holdings), 1)
+
+    # The pair that would catch a mode silently reverting.
+    check("average is the default", compute_positions(multi_lot).realized(
+        Category.EQUITY), 900.0)
+    check("the two modes genuinely disagree here",
+          compute_positions(multi_lot, cost_basis=CostBasis.FIFO).realized(
+              Category.EQUITY)
+          != compute_positions(multi_lot, cost_basis=CostBasis.AVERAGE).realized(
+              Category.EQUITY), True)
+
+    # Timing, not totals: close the position out and both modes agree exactly.
+    closed_out = multi_lot + [_trade(4, "Sell", 40, 1000.0, "MULTI")]
+    fifo_all = compute_positions(closed_out, cost_basis=CostBasis.FIFO)
+    avg_all = compute_positions(closed_out, cost_basis=CostBasis.AVERAGE)
+    check("a fully closed position realizes the same either way",
+          fifo_all.realized(Category.EQUITY), avg_all.realized(Category.EQUITY))
+    check("a fully closed position realizes the ledger's cash",
+          avg_all.realized(Category.EQUITY), 1300.0)   # -500-1000+1800+1000
+    check("a fully closed position leaves nothing open either way",
+          (fifo_all.open_shares, avg_all.open_shares), (0.0, 0.0))
+
+    # Selling everything then buying again must not inherit the old average.
+    reopened = [
+        _trade(1, "Buy", 100, -1000.0, "RESET"),      # 100 @ 10
+        _trade(2, "Sell", 100, 1200.0, "RESET"),      # all out
+        _trade(3, "Buy", 10, -500.0, "RESET"),        # 10 @ 50, fresh
+    ]
+    r = compute_positions(reopened)
+    check("average resets once the position is fully closed",
+          r.equity_holdings[0].avg_price, 50.0)
+    check("average reset keeps the realized figure intact",
+          r.realized(Category.EQUITY), 200.0)
+
+    # Options must ignore the setting: two strikes never blend.
+    calls = [
+        _trade(1, "BTO", 1, -300.0, "AAPL", "AAPL 7/17/2026 Call $220.00",
+               Category.OPTIONS),
+        _trade(2, "BTO", 1, -100.0, "AAPL", "AAPL 7/17/2026 Call $260.00",
+               Category.OPTIONS),
+        _trade(3, "STC", 1, 500.0, "AAPL", "AAPL 7/17/2026 Call $220.00",
+               Category.OPTIONS),
+    ]
+    for mode in (CostBasis.AVERAGE, CostBasis.FIFO):
+        r = compute_positions(calls, cost_basis=mode)
+        check(f"options ignore cost basis ({mode.value}): only its own contract closes",
+              r.realized(Category.OPTIONS), 200.0)
+        check(f"options ignore cost basis ({mode.value}): the other strike stays open",
+              [h.key for h in r.option_holdings], ["AAPL 7/17/2026 Call $260.00"])
 
     # --- short option round trip ------------------------------------------
     contract = "AAPL 7/17/2026 Call $220.00"
@@ -467,6 +541,22 @@ def _group_4_sample_totals():
     check("corporate action moved no cash",
           m.categories[Category.CORPORATE_ACTION].cash_total, 0.0)
 
+    # Every figure above is identical under either cost basis, because no
+    # ticker in the fixture has two buys before a sell. That is worth asserting
+    # rather than assuming: it is the reason the multi-lot fixture in group 3
+    # exists, and if someone adds a second lot to sample_data these totals move
+    # and this check is what says so.
+    fifo = compute_positions(classified, cost_basis=CostBasis.FIFO)
+    avg = compute_positions(classified, cost_basis=CostBasis.AVERAGE)
+    for cat in (Category.EQUITY, Category.OPTIONS):
+        check(f"sample_data cannot distinguish cost basis ({cat.value})",
+              fifo.realized(cat), avg.realized(cat))
+    check("sample_data open basis is the same under either cost basis",
+          fifo.open_equity_cost_basis, avg.open_equity_cost_basis)
+    check("sample_data holdings are the same under either cost basis",
+          [(h.key, h.quantity, round(h.avg_price, 6)) for h in fifo.equity_holdings],
+          [(h.key, h.quantity, round(h.avg_price, 6)) for h in avg.equity_holdings])
+
 
 def _group_5_categorize():
     group(5, "categorisation rules")
@@ -612,10 +702,32 @@ def _group_8_dashboard():
         check("four open equity positions listed (TSLA, AAPL, NVDA, LCID)",
               len([p for p in res["open_positions"] if p["category"] == "Equity"]), 4)
 
+        check("the result reports which cost basis produced it",
+              res["cost_basis"], "average")
+
         out = Path(res["output"])
         check("output file exists", out.exists(), True)
         html = out.read_text(encoding="utf-8")
         check("doctype present", html.strip().startswith("<!doctype html>"), True)
+        check("the page states the cost basis that produced it",
+              "Equity cost basis: <strong>average cost</strong>" in html, True)
+        check("the page does not claim FIFO when averaging",
+              "matched <strong>FIFO</strong>" in html, False)
+
+        # The same statements under the other mode must say so, or two pages
+        # that disagree on the numbers look identical to a reader.
+        alt = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
+                              filename="fifo.html", cost_basis=CostBasis.FIFO)
+        alt_html = Path(alt["output"]).read_text(encoding="utf-8")
+        check("the FIFO page states FIFO",
+              "Equity cost basis: <strong>FIFO (first in, first out)</strong>" in alt_html,
+              True)
+        check("the alternate mode is surfaced in the result", alt["cost_basis"], "fifo")
+        check("both modes agree on net income for this fixture",
+              alt["net_income"], res["net_income"])
+        check("switching cost basis changes only the prose for this fixture",
+              len(_strip_generated(html).splitlines()),
+              len(_strip_generated(alt_html).splitlines()))
         for label in ("Net income", "Open positions", "Equity", "Options",
                       "Dividends/Interest", "Fees", "Margin", "Gold",
                       "Deposits", "Withdraw", "Corporate action",
@@ -706,14 +818,14 @@ def _group_9_server():
     group(9, "http server, upload and file management")
     import os
 
-    from .server import AuthConfigError, ServerConfig, safe_name
+    from .server import AuthConfigError, ConfigError, ServerConfig, safe_name
 
     # Credentials arrive as env vars in every deployment, so from_env is the
     # real configuration surface — and its dangerous failure is fail-open.
     def _cfg(**env):
         saved = {k: os.environ.get(k) for k in
                  ("RH_DASHBOARD_USER", "RH_DASHBOARD_PASSWORD",
-                  "RH_DASHBOARD_AUTH_REQUIRED")}
+                  "RH_DASHBOARD_AUTH_REQUIRED", "RH_DASHBOARD_COST_BASIS")}
         try:
             for k in saved:
                 os.environ.pop(k, None)
@@ -730,6 +842,39 @@ def _group_9_server():
           _cfg(RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD="p").auth_required, True)
     check("a username alone does not half-enable auth",
           _cfg(RH_DASHBOARD_USER="u").auth_required, False)
+
+    # Cost basis arrives the same way, and an unrecognised value must refuse
+    # rather than fall back — serving figures computed a different way than the
+    # operator asked for is a failure that never announces itself.
+    check("cost basis defaults to average when unset", _cfg().cost_basis,
+          CostBasis.AVERAGE)
+    check("cost basis can be set from the environment",
+          _cfg(RH_DASHBOARD_COST_BASIS="fifo").cost_basis, CostBasis.FIFO)
+    check("cost basis tolerates surrounding whitespace and case",
+          _cfg(RH_DASHBOARD_COST_BASIS="  FIFO ").cost_basis, CostBasis.FIFO)
+    refused = False
+    try:
+        _cfg(RH_DASHBOARD_COST_BASIS="lifo")
+    except ConfigError:
+        refused = True
+    check("an unrecognised cost basis refuses to start", refused, True)
+    check("an explicit argument beats the environment",
+          ServerConfig.from_env("in", "out", cost_basis=CostBasis.FIFO).cost_basis,
+          CostBasis.FIFO)
+
+    # ...which only works if the CLI flag leaves the decision open when it was
+    # not given. An argparse default of "average" here made the environment
+    # variable look like it did nothing at all: `serve` read the flag's default,
+    # never the variable, and started happily on a value it should have
+    # refused. The flag beats the environment; its *absence* must not.
+    from .cli import build_parser
+    check("the serve flag defaults to None so the environment can decide",
+          build_parser().parse_args(["serve"]).cost_basis, None)
+    check("the serve flag is honoured when given",
+          build_parser().parse_args(["serve", "--cost-basis", "fifo"]).cost_basis,
+          "fifo")
+    check("the build flag defaults to None too",
+          build_parser().parse_args(["build"]).cost_basis, None)
     check("an empty password does not enable auth",
           _cfg(RH_DASHBOARD_USER="u", RH_DASHBOARD_PASSWORD="").auth_required, False)
 

@@ -18,11 +18,31 @@ offline, because the input is real account activity.
 ./rh-dashboard build              # reads input/*.csv, writes output/dashboard.html
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
-./rh-dashboard selftest           # 266 assertions across 9 groups
+./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
+./rh-dashboard selftest           # 302 assertions across 9 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
 you used `serve`.
+
+### Cost basis
+
+Closed equity lots are matched at **average cost** by default: every open lot
+of a ticker is blended into one running cost per share, and a sale realizes
+against that blend. `--cost-basis fifo` consumes the oldest lot first instead,
+which is what Robinhood's own 1099-B reports — pick it if you are comparing
+this dashboard against a tax document.
+
+The two agree on lifetime P&L for a position that fully closes; they differ
+only in *when* a gain lands while a position is still partly open. Options
+ignore the setting entirely, since a contract has no purchase price to average
+and two strikes on the same underlying must never blend.
+
+The rendered page always names the mode that produced it — two dashboards
+built from the same statements under different settings otherwise look
+identical and report different numbers. The server reads
+`RH_DASHBOARD_COST_BASIS` (the chart's `costBasis` value) and refuses to start
+on an unrecognised one rather than quietly falling back.
 
 ## The central idea: buying a stock is not a loss
 

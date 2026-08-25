@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from .assets import FAVICON_DATA_URI
 from .metrics import Metrics
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
-                    PRIMARY_CATEGORIES, TRANSFER_CATEGORIES, Category)
+                    PRIMARY_CATEGORIES, TRANSFER_CATEGORIES, Category, CostBasis)
 from .positions import PositionsResult
 from .render import esc, render_bar_chart, render_line_chart
 
@@ -433,7 +433,37 @@ def _verdict_words(net_income: float) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------
-def _summary_section(m: Metrics) -> str:
+_COST_BASIS_LABEL = {
+    CostBasis.AVERAGE: "average cost",
+    CostBasis.FIFO: "FIFO (first in, first out)",
+}
+
+
+def _cost_basis_note(cost_basis: CostBasis) -> str:
+    """Say which lot a sale consumed, and what that means for a tax document.
+
+    Average cost and FIFO realise the same lifetime P&L on a position that
+    fully closes; they disagree only while one is open. A reader comparing this
+    page against a 1099-B needs to know which they are looking at, so the note
+    names the other mode and how to switch.
+    """
+    if cost_basis is CostBasis.FIFO:
+        return (
+            "<p>Closed lots are matched <strong>FIFO</strong> (first in, first out) "
+            "&mdash; the standard default when no specific tax lot is elected, and "
+            "what Robinhood reports. If you elected specific lots with Robinhood, "
+            "your realized figures will differ from these.</p>")
+    return (
+        "<p>Closed lots are matched at <strong>average cost</strong>: every open lot "
+        "of a ticker is blended into one running cost per share, and a sale realizes "
+        "against that blend. Robinhood reports <strong>FIFO</strong> (first in, first "
+        "out) instead, so while a position is partly open these figures will differ "
+        "from a 1099-B &mdash; the totals agree once it closes completely. Rebuild "
+        "with <code>--cost-basis fifo</code> to match the tax document. Options are "
+        "unaffected either way: a contract has no purchase price to average.</p>")
+
+
+def _summary_section(m: Metrics, cost_basis: CostBasis) -> str:
     date_range = (f"{m.date_range[0]} to {m.date_range[1]}") if m.date_range else "no data"
     cls, phrase = _verdict_words(m.net_income)
 
@@ -486,7 +516,8 @@ def _summary_section(m: Metrics) -> str:
   <section class="card" id="summary">
     <h2>Summary</h2>
     <p class="sub-head">Net income counts realized results only. Open positions and
-      bank transfers are reported separately below, because neither is a gain or a loss.</p>
+      bank transfers are reported separately below, because neither is a gain or a loss.
+      Equity cost basis: <strong>{_COST_BASIS_LABEL[cost_basis]}</strong>.</p>
     <div class="summary-heroes">
       {_money_tile("Net income", m.net_income,
                     "Realized trading P&L + dividends/interest - fees - margin - Gold",
@@ -641,7 +672,8 @@ def _transactions_table(classified) -> str:
 # --------------------------------------------------------------------------
 def build_page(m: Metrics, positions: PositionsResult, classified: list,
                files_read: list[str], row_errors: list[str],
-               interactive: bool = False) -> str:
+               interactive: bool = False,
+               cost_basis: CostBasis = CostBasis.AVERAGE) -> str:
     """
     Render the whole page.
 
@@ -649,6 +681,11 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
     `server.py`. Left false — the CLI path — not one byte of the output
     changes, so a dashboard built on the command line never ships a button
     that posts to a server the file has no way to reach.
+
+    `cost_basis` is stated on the page rather than merely applied to it. Two
+    dashboards built from the same statements under different settings look
+    identical and report different numbers, so the setting has to travel with
+    the output.
     """
     # --- charts -----------------------------------------------------------
     line_series = [
@@ -760,7 +797,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
 
   {callout_html}
 
-  {_summary_section(m)}
+  {_summary_section(m, cost_basis)}
 
   {_open_positions_section(m, positions)}
 
@@ -795,9 +832,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
     value rather than spending it. Selling is what realizes a gain or a loss, and only
     for the shares sold: sell 50 of 100 shares and half the position is realized while
     the other half stays open.</p>
-    <p>Closed lots are matched <strong>FIFO</strong> (first in, first out) &mdash; the
-    standard default when no specific tax lot is elected. If you elected specific lots
-    with Robinhood, your realized figures will differ from these.</p>
+    {_cost_basis_note(cost_basis)}
     <p><strong>There is no mark-to-market anywhere on this page.</strong> A statement
     export carries no live price, so open positions are shown at what they cost, not at
     what they are worth now. Your actual unrealized gain or loss on the

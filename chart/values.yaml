@@ -83,6 +83,19 @@ auth:
   username: ""
   password: ""
 
+# Which open equity lot a sale consumes: "average" or "fifo".
+#
+# They realise the same lifetime P&L on a position that fully closes, and
+# disagree only while one is still open — so this changes *when* a gain lands,
+# not how much of it exists. "fifo" is what Robinhood's own 1099-B reports, so
+# pick it if you compare this dashboard against a tax document.
+#
+# An unrecognised value makes the pod refuse to start rather than fall back to
+# a default: serving figures computed a different way than you asked for is a
+# failure that never announces itself. The rendered page always names the mode
+# that produced it, for the same reason.
+costBasis: average
+
 # Largest upload accepted, in bytes. A 556-row statement export is ~50 KB.
 maxUploadBytes: 10485760
 

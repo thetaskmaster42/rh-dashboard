@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .loader import LoadError, load_file
+from .model import CostBasis
 from .pipeline import build_dashboard
 
 DEFAULT_MAX_UPLOAD = 10 * 1024 * 1024      # 10 MB; a 556-row export is ~50 KB
@@ -44,7 +45,13 @@ SAFE_NAME = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 _TRUTHY = ("1", "true", "yes", "on")
 
 
-class AuthConfigError(RuntimeError):
+class ConfigError(RuntimeError):
+    """The environment asks for something the server cannot honour. Raised
+    instead of starting, so a misconfigured pod crash-loops visibly rather
+    than serving something subtly different from what was asked for."""
+
+
+class AuthConfigError(ConfigError):
     """Auth was demanded but not usable. Raised instead of starting."""
 
 
@@ -56,13 +63,15 @@ class ServerConfig:
     max_upload: int = DEFAULT_MAX_UPLOAD
     username: str | None = None
     password: str | None = None
+    cost_basis: CostBasis = CostBasis.AVERAGE
 
     @property
     def auth_required(self) -> bool:
         return bool(self.username and self.password)
 
     @classmethod
-    def from_env(cls, input_dir, output_dir, filename: str = "dashboard.html"):
+    def from_env(cls, input_dir, output_dir, filename: str = "dashboard.html",
+                 cost_basis: CostBasis | None = None):
         """
         Credentials come from the environment so the chart can wire them
         straight from a Secret. Auth is off unless *both* are set: a username
@@ -75,6 +84,13 @@ class ServerConfig:
         the values arrive from a SOPS-encrypted Secret, where a renamed key or
         an empty string is a plausible mistake and the fail-open version of it
         is silent.
+
+        `RH_DASHBOARD_COST_BASIS` lets the chart pick the equity cost basis the
+        same way. An unrecognised value is refused rather than quietly falling
+        back: silently serving figures computed a different way than the
+        operator asked for is the kind of wrong that never announces itself.
+        An explicit `cost_basis` argument wins, so the CLI flag beats the
+        environment.
         """
         username = os.environ.get("RH_DASHBOARD_USER") or None
         password = os.environ.get("RH_DASHBOARD_PASSWORD") or None
@@ -88,8 +104,18 @@ class ServerConfig:
                 f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} "
                 "empty or missing. Refusing to start unauthenticated — check the "
                 "Secret's key names and that its values are non-empty.")
+        if cost_basis is None:
+            raw = os.environ.get("RH_DASHBOARD_COST_BASIS", "").strip().lower()
+            try:
+                cost_basis = CostBasis(raw) if raw else CostBasis.AVERAGE
+            except ValueError:
+                raise ConfigError(
+                    f"RH_DASHBOARD_COST_BASIS is {raw!r}, which is not one of "
+                    f"{', '.join(c.value for c in CostBasis)}. Refusing to start "
+                    f"rather than serve figures computed a different way than "
+                    f"asked for.") from None
         return cls(input_dir=Path(input_dir), output_dir=Path(output_dir),
-                   filename=filename,
+                   filename=filename, cost_basis=cost_basis,
                    max_upload=int(os.environ.get("RH_DASHBOARD_MAX_UPLOAD",
                                                  DEFAULT_MAX_UPLOAD)),
                    username=username, password=password)
@@ -129,7 +155,8 @@ class PageCache:
                 res = build_dashboard(input_dir=cfg.input_dir,
                                       output_dir=cfg.output_dir,
                                       filename=cfg.filename,
-                                      interactive=True)
+                                      interactive=True,
+                                      cost_basis=cfg.cost_basis)
                 self.html = Path(res["output"]).read_text(encoding="utf-8")
                 self.key = key
             return self.html

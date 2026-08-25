@@ -6,11 +6,26 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .model import CostBasis
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent                      # rh-dashboard/
 DEFAULT_INPUT = ROOT / "input"
 DEFAULT_OUTPUT = ROOT / "output"
+
+
+def _add_cost_basis(p: argparse.ArgumentParser) -> None:
+    """Which open lot a sale consumes. Averaging blends the open lots; FIFO
+    takes the oldest first, which is what Robinhood's own 1099-B reports. The
+    two differ in *when* P&L lands, not in how much of it there is."""
+    # Defaults to None, not to "average": `serve` also reads
+    # RH_DASHBOARD_COST_BASIS, and a flag default would shadow the environment
+    # so silently that the variable would look like it did nothing.
+    p.add_argument("--cost-basis", choices=[c.value for c in CostBasis],
+                   default=None,
+                   help="equity cost basis for closed lots "
+                        f"(default: {CostBasis.AVERAGE.value}; "
+                        f"{CostBasis.FIFO.value} matches a 1099-B)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"output folder (default: {DEFAULT_OUTPUT})")
     b.add_argument("--filename", default="dashboard.html",
                    help="output file name (default: dashboard.html)")
+    _add_cost_basis(b)
 
     v = sub.add_parser("serve", help="serve the dashboard and accept CSV uploads")
     v.add_argument("--host", default="127.0.0.1",
@@ -37,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"folder of statement CSVs (default: {DEFAULT_INPUT})")
     v.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT,
                    help=f"output folder (default: {DEFAULT_OUTPUT})")
+    _add_cost_basis(v)
 
     sub.add_parser("selftest", help="run the internal verification suite")
 
@@ -60,10 +77,13 @@ def main(argv=None) -> int:
 
 
 def _cmd_serve(args) -> int:
-    from .server import AuthConfigError, ServerConfig, serve
+    from .server import ConfigError, ServerConfig, serve
     try:
-        cfg = ServerConfig.from_env(args.input, args.output)
-    except AuthConfigError as e:
+        # None lets RH_DASHBOARD_COST_BASIS decide; the flag wins when given.
+        cfg = ServerConfig.from_env(
+            args.input, args.output,
+            cost_basis=CostBasis(args.cost_basis) if args.cost_basis else None)
+    except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     return serve(args.host, args.port, cfg)
@@ -74,7 +94,9 @@ def _cmd_build(args) -> int:
     from .pipeline import build_dashboard
     try:
         res = build_dashboard(input_dir=args.input, output_dir=args.output,
-                              filename=args.filename)
+                              filename=args.filename,
+                              cost_basis=(CostBasis(args.cost_basis)
+                                          if args.cost_basis else CostBasis.AVERAGE))
     except LoadError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

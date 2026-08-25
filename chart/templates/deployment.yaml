@@ -52,6 +52,8 @@ spec:
           env:
             - name: RH_DASHBOARD_MAX_UPLOAD
               value: {{ .Values.maxUploadBytes | quote }}
+            - name: RH_DASHBOARD_COST_BASIS
+              value: {{ .Values.costBasis | quote }}
             {{- if .Values.auth.enabled }}
             # Says "I meant to have auth". With this set the server refuses to
             # start on missing or empty credentials rather than quietly
