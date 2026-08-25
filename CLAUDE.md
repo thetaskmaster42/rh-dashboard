@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `rh-dashboard` reads a folder of Robinhood statement CSVs, dedupes them,
-categorizes every row into one of eleven buckets, FIFO-matches trades to
+categorizes every row into one of eleven buckets, lot-matches trades to
 separate realized P&L from open holdings, and writes a self-contained HTML
 dashboard.
 
@@ -33,12 +33,20 @@ elsewhere in this file:
   `rel="stylesheet"`, and **no `https?://` anywhere in the output HTML at
   all**. That last one is the easy trap — a documentation link, a source URL,
   even one inside an HTML comment, fails the build. Keep URLs out of
-  `dashboard.py`'s emitted markup.
+  `dashboard.py`'s emitted markup. The favicon is the one asset with a real
+  pull to link rather than embed, so group 8 additionally asserts it is a
+  `data:image/png;base64,` URI, decodes to a real PNG, and stays under 4 KB.
 - **CLI page is byte-stable** (PRs only): rebuilds `sample_data` at the merge
   base and at HEAD and diffs, ignoring the `Generated` timestamp. It *warns*
   rather than fails — read the annotation, don't assume green means unchanged.
-- **helm**: `helm lint` plus `helm template` over every conditional path, and
-  asserts `--set auth.enabled=true` with no credentials **refuses** to render.
+- **helm**: `helm lint` plus `helm template` over every conditional path;
+  asserts `--set auth.enabled=true` with no credentials **refuses** to render;
+  and runs `.github/scripts/check_chart_auth_keys.py` over three rendered
+  permutations to prove the Secret the chart writes and the Secret the
+  Deployment reads carry the same keys — a mismatch renders valid YAML and
+  only fails at pod start as `CreateContainerConfigError`. That script imports
+  `yaml`; it is CI-only tooling and does **not** breach the zero-dependency
+  rule, which covers what ships in `rh_dashboard/`.
 - **image**: builds the container, runs `python -m rh_dashboard.cli selftest`
   *inside it*, then boots it and drives `/healthz` → `/api/upload` → `/`.
 
@@ -55,7 +63,8 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build -i sample_data -o /tmp/preview  # try it on the bundled fictional fixtures first
 ./rh-dashboard build --filename jan.html             # rename the output file
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
-./rh-dashboard selftest                              # 235 assertions across 9 groups
+./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
+./rh-dashboard selftest                              # 302 assertions across 9 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
@@ -76,7 +85,8 @@ statement rows into tests, fixtures, or commit messages.
 | `sample_data/*.csv` | re-derive the expected constants in `selftest.py` **by hand**, then `./rh-dashboard selftest` |
 | `dashboard.py` | `./rh-dashboard selftest`, and confirm `build` output didn't move: diff a fresh `build -i sample_data` against the previous one, ignoring the `Generated` timestamp |
 | `server.py` | `./rh-dashboard selftest` (group 9 drives the handler over real HTTP), and confirm the CLI page did *not* move — a server-only change that shifts `build` output means upload chrome leaked out of the `interactive` guard |
-| `chart/**` | `helm lint ./chart && helm template rh ./chart`, plus `helm template rh ./chart --set auth.enabled=true` with **no** credentials, which must *fail* |
+| `positions.py` | `./rh-dashboard selftest`, and check the change under **both** cost bases — `--cost-basis average` and `fifo` — since `sample_data` alone cannot tell them apart |
+| `chart/**` | `helm lint ./chart && helm template rh ./chart`, plus `helm template rh ./chart --set auth.enabled=true` with **no** credentials, which must *fail*; if you touched the Secret or the Deployment's env, also render with `auth.usernameKey`/`auth.passwordKey` overridden and run `.github/scripts/check_chart_auth_keys.py` over the output |
 | `.github/workflows/**` | nothing local runs it; check the run on the PR |
 
 ## Architecture
@@ -86,7 +96,7 @@ statement is a *cash ledger*, but the dashboard reports an *income statement*.
 Buying a stock is not an expense — it converts cash into an asset of equal
 value. Summing raw Buy/Sell cash per category (which this project did
 originally, and which was wrong) makes any account holding open positions look
-like it's losing money. So Equity and Options reach Net Income as **FIFO-matched
+like it's losing money. So Equity and Options reach Net Income as **lot-matched
 realized P&L on closed lots only**, and what's still open is reported separately
 as cost basis. Don't "simplify" that back into a cash sum.
 
@@ -129,7 +139,7 @@ metrics asks `positions.py` for the realized figures.
    income), `LOT_MATCHED_CATEGORIES` (Equity/Options), `FALLBACK_CATEGORIES`,
    and `CATEGORY_ORDER` — the one fixed iteration order every
    table/chart/legend uses so a category's colour slot never shifts.
-4. **`positions.py`** FIFO-matches every opening trade against its closing
+4. **`positions.py`** lot-matches every opening trade against its closing
    trades. One engine covers equity and options because both reduce to
    `realized = (closing cash/unit + opening cash/unit) × units matched` when
    you work in signed cash-per-unit (`amount / quantity`) rather than prices —
@@ -150,14 +160,43 @@ metrics asks `positions.py` for the realized figures.
      surrendered lots' cost basis carries onto the shares received and the
      exchange realizes nothing. Before this was handled, every SPAC and ticker
      change stayed "open" forever because nothing ever closed the position.
+   - **Surrendered basis that never reaches incoming shares is counted, named
+     and warned about** — never dropped. `ca_basis_pool` is filled by the
+     outgoing leg and drained by the incoming one; a cash merger, a delisting,
+     or an incoming leg in a later statement leaves a residual. It is exposed
+     as `PositionsResult.unmatched_corporate_action_basis` so the
+     reconciliation banner can name its own cause. The banner still fires —
+     the basis really is gone and no honest number replaces it — but it says
+     why.
+   - **The expiry warning is judged against the end of the range being
+     *reported*, not the last row on file.** Those are the same thing only
+     while every call gets full history. `compute_positions(..., full_history=)`
+     tells "no closing row exists anywhere" (a real gap) apart from "the
+     closing row is simply dated later" (not a problem at all). Passing
+     nothing leaves both the same, which is the unwindowed behaviour.
+   - **Cost basis is selectable and `CostBasis.AVERAGE` is the default.**
+     Average cost blends every open equity lot into one running lot; FIFO
+     queues them. The entire difference lives in `_absorb` — under averaging a
+     purchase folds into the single held lot, so closes walk the *same* FIFO
+     path in both modes and there stays exactly one place a sale is matched
+     and one place a cost is set. Shares received from a corporate action
+     blend the same way, or a merger silently leaves a second lot behind.
+     **Options ignore the setting**: a short-to-open contract has no purchase
+     price to average, and two strikes on the same underlying must never
+     blend. The two modes agree on lifetime P&L for a fully closed position
+     and differ only while one is open — which is exactly what a date window
+     exposes, and why the mode is selectable rather than assumed.
 5. **`metrics.py`** builds the income statement: per-category `cash_total`
    (raw) *and* `income_total` (realized, for lot-matched categories), monthly
    cumulative series driven by realized events rather than raw cash, and
    `net_income`. It also computes `reconciliation_error` and asserts the
-   identity `net income − open position cash + transfers ≡ total cash
-   movement`. **If you change how any category aggregates, that identity is
-   the check that catches a double-count** — the dashboard renders a loud
-   warning when it fails.
+   identity `net income − open position cash + transfers + corporate action
+   cash ≡ total cash movement`. That last term is normally zero — a merger
+   moves shares, not money — but a cash-plus-stock merger does move cash and
+   reaches neither income nor transfers, so leaving it implicit made a correct
+   run fail to reconcile for a reason the banner could not name. **If you
+   change how any category aggregates, that identity is the check that catches
+   a double-count** — the dashboard renders a loud warning when it fails.
 6. **`render.py`** draws the line/bar charts as hand-rolled inline SVG —
    no charting library. They are embedded in the page rather than linked so
    marks can use `var(--series-N)` and repaint for dark mode. It's fully
@@ -167,9 +206,20 @@ metrics asks `positions.py` for the realized figures.
    categories already spend the categorical palette's validated 8-slot ceiling.
    **`dashboard.py`** assembles the page: Summary (net income + the two-column
    calculation/reconciliation tables), the open-positions table, stat tiles,
-   legend/filter chips, transaction table, and the one vanilla-JS block driving
+   legend/filter chips, transaction table, the cost-basis note (the page
+   **states which mode produced it** — two dashboards built from the same
+   statements under different settings otherwise look identical and report
+   different numbers, and the footer used to claim FIFO unconditionally),
+   and the one vanilla-JS block driving
    hover tooltips — no external script, style, or font, so the file works
-   fully offline.
+   fully offline. **`assets.py`** holds the only binary the page carries: the
+   tab favicon, base64 PNG inline, because a linked icon file would be a
+   network request and break that guarantee. Two places emit the `<head>` that
+   references it — `dashboard.py` and `server.py`'s `_no_data_page` — so a head
+   element added to one and not the other drifts them. `images/icon.png` is the
+   512x512 original; the docstring in `assets.py` carries the Pillow snippet
+   that regenerates the 32x32 bytes, and Pillow is deliberately not a
+   dependency of anything that runs.
 7. **`pipeline.build_dashboard`** is the public API tying the above together;
    **`cli.py`** is the argparse wrapper; `rh-dashboard` (repo-relative
    executable) puts its own directory on `sys.path` and calls `cli.main`.
@@ -186,6 +236,9 @@ metrics asks `positions.py` for the realized figures.
    `dedupe.py` keeps the per-file maximum multiplicity — an identical re-upload
    answers `duplicate` and writes nothing, while the *same name with different
    bytes* is kept alongside as `name-2.csv` rather than overwriting.
+   An empty volume is the normal starting state of a fresh deployment, not an
+   error: `build_dashboard` raises `LoadError` there, and `_no_data_page`
+   answers with the same upload chrome instead of a 500 the user cannot act on.
    A `PageCache` keyed on the input folder's file list/mtimes/sizes rebuilds
    the page only when the volume actually changed; upload and delete invalidate
    it explicitly. Config comes from `ServerConfig.from_env`:
@@ -198,16 +251,33 @@ metrics asks `positions.py` for the realized figures.
    instead of serving unauthenticated. The chart sets it whenever
    `auth.enabled`, so a SOPS Secret with a renamed key or an empty value
    crash-loops visibly. Don't "fix" the fail-open by enabling auth from a
-   partial config — a username with no password is not a password. The container runs `python -m rh_dashboard.cli serve --host
-   0.0.0.0` because the CLI default of `127.0.0.1` is deliberately unreachable
-   from outside a container.
+   partial config — a username with no password is not a password.
+   `RH_DASHBOARD_COST_BASIS` picks the equity cost basis the same way (the
+   chart's `costBasis`); an unrecognised value raises `ConfigError` — now the
+   parent of `AuthConfigError`, so both refusals exit the same way — rather
+   than falling back, because serving figures computed a different way than
+   the operator asked for is a failure that never announces itself. **The CLI
+   flags default to `None`, not to a mode**: an argparse default of `average`
+   shadowed the env var completely, so `serve` read the flag's default and
+   never the variable, and started happily on a value it should have refused.
+   The flag beats the environment; its *absence* must not. The container runs
+   `python -m rh_dashboard.cli serve --host 0.0.0.0` because the CLI default
+   of `127.0.0.1` is deliberately unreachable from outside a container.
 
-`selftest.py` group 3 unit-tests the FIFO engine (open-only, partial sale, FIFO
-ordering across lots, short options, expiry, oversell) and group 7 asserts the
-reconciliation invariants. `sample_data/` is built specifically to exercise the
+`selftest.py` group 3 unit-tests the lot engine (open-only, partial sale, FIFO
+ordering across lots, average-cost blending, short options, expiry, oversell,
+orphaned corporate-action basis) and group 7 asserts the reconciliation
+invariants. `sample_data/` is built specifically to exercise the
 open/partial/closed cases — TSLA never sold, AAPL half sold, SPY fully closed —
 so those numbers are load-bearing; changing the CSVs means re-deriving the
 expected constants in `selftest.py` by hand.
+
+**What `sample_data` cannot test**: no ticker in it has two buys before a sell,
+so average cost and FIFO agree on every figure in the fixture and it cannot
+tell the two modes apart. The multi-lot fixture in group 3 is what actually
+verifies the cost-basis setting; group 4 asserts the equivalence explicitly, so
+adding a second lot to `sample_data` fails there rather than silently making a
+mode-specific bug invisible.
 
 ## Convention
 
