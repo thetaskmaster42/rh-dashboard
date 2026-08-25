@@ -44,7 +44,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
 
-from .model import Category, Classified, CostBasis
+from .model import Category, Classified, CostBasis, Window
 
 # Trans codes that OPEN a position, per category.
 OPENING_CODES = {
@@ -179,6 +179,40 @@ class PositionsResult:
 
     def realized(self, cat: Category) -> float:
         return self.realized_by_category.get(cat, 0.0)
+
+    def windowed(self, start: date) -> "PositionsResult":
+        """This result, reporting only what was realized on or after `start`.
+
+        Holdings and the open_* figures are left exactly as they are: they are
+        already "as of the end", because this result was built from the rows up
+        to the window end and every pre-window lot is carried at its real cost.
+        Only the realized side is filtered — those are dated events, and the
+        window selects which of them belong to the period being reported.
+
+        Takes `start` alone, deliberately. An `end` parameter would be a lie
+        waiting to happen: this result already has an end baked into the rows
+        it was built from, and a caller passing a different one would silently
+        get holdings as of one date and income as of another.
+
+        `realized_by_category` is rebuilt by summing the surviving events
+        rather than scaled or subtracted, so it cannot drift from them. It also
+        has to tolerate categories outside LOT_MATCHED_CATEGORIES: a
+        corporate-action row with no usable quantity emits an event of its own.
+        """
+        events = [e for e in self.realized_events if e.activity_date >= start]
+        by_cat: dict[Category, float] = {}
+        for e in events:
+            by_cat[e.category] = by_cat.get(e.category, 0.0) + e.amount
+        return PositionsResult(
+            holdings=self.holdings,
+            realized_events=events,
+            realized_by_category=by_cat,
+            open_shares=self.open_shares,
+            open_equity_cost_basis=self.open_equity_cost_basis,
+            open_options_net_cash=self.open_options_net_cash,
+            warnings=self.warnings,
+            unmatched_corporate_action_basis=self.unmatched_corporate_action_basis,
+        )
 
     @property
     def equity_holdings(self) -> list[Holding]:
@@ -469,6 +503,37 @@ def compute_positions(classified: list[Classified], *,
         warnings=warnings,
         unmatched_corporate_action_basis=unmatched_ca_basis,
     )
+
+
+def compute_windowed(classified: list[Classified], window: Window, *,
+                     cost_basis: CostBasis = CostBasis.AVERAGE
+                     ) -> tuple[PositionsResult, PositionsResult]:
+    """Match over full history, report over `window`.
+
+    Returns `(reported, opening)`:
+
+      * `reported` — holdings and open_* as of the window END, with realized
+        events filtered to the window. Every lot opened before the window is
+        carried at its real cost, which is the entire reason this is not
+        "filter the rows, then match".
+      * `opening` — the engine run over everything strictly BEFORE the window.
+        Its final state is the state the window opened with, and the two
+        together give the delta identity in `metrics.compute`.
+
+    Two passes, not three. The plan called for a third "full history" run only
+    to word the expiry warning; passing `full_history=` to the as-of pass buys
+    the same distinction without matching every lot twice.
+
+    This exists as one function so a caller cannot pair holdings from one date
+    with income from another, which is the mistake the whole design is built to
+    prevent.
+    """
+    as_of = [c for c in classified if window.as_of(c.txn.activity_date)]
+    before = [c for c in classified if window.before(c.txn.activity_date)]
+    end_state = compute_positions(as_of, full_history=classified,
+                                  cost_basis=cost_basis)
+    opening = compute_positions(before, cost_basis=cost_basis)
+    return end_state.windowed(window.start), opening
 
 
 def _money(v: float) -> str:

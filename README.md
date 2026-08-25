@@ -20,7 +20,7 @@ is unchanged and CI enforces it.
 ./rh-dashboard build -i sample_data -o /tmp/preview   # try the bundled sample first
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
-uv run ./rh-dashboard selftest    # 318 assertions across 10 groups
+uv run ./rh-dashboard selftest    # 369 assertions across 11 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if

@@ -1,6 +1,9 @@
 # Feature: date window
 
-Status: **design, awaiting approval to implement.**
+Status: **the windowing engine is implemented** (`Window`, `compute_windowed`,
+`PositionsResult.windowed`, the delta identity in `metrics.compute`, selftest
+group 11). Not yet reachable from the CLI or the dashboard — that exposure, and
+the dropdown/rollup work in "Dashboard changes", is the next branch.
 
 This is a significant change from the original project, so development and
 testing happen in a separate environment before anything reaches the homelab.
@@ -196,8 +199,9 @@ windowed(W)      = cumulative(end) − cumulative(start − 1)
 
 The additivity property is the correctness check: two disjoint windows must sum
 to the range that contains them. Confirmed against `sample_data` on the current
-engine — June `+88.91` and July `+709.25` sum to the full-range `+798.16`, with
-reconciliation error `0.000000` in all three.
+engine — June `+88.91` and July `+1,459.25` sum to the full-range `+1,548.16`,
+with reconciliation error `0.000000` in all three. Under FIFO the July figure is
+`+709.25` and the full range `+798.16`; cash is `-24,806.84` either way.
 
 On the page:
 
@@ -336,12 +340,12 @@ Hand-derived from `sample_data`, then confirmed against the engine:
 |---|---|---|
 | Equity realized | +100.00 | **+500.00** |
 | Options realized | 0.00 | **+210.00** |
-| Net income (windowed) | +88.91 | **+709.25** |
-| Net income (cumulative, to end) | +88.91 | **+798.16** |
-| Total cash | −14,996.09 | **+5,189.25** |
-| Opening / ending equity basis | 0.00 → 45,405.00 | **45,405.00 → 39,105.00** |
+| Net income (windowed) | +88.91 | **+1,459.25** (fifo +709.25) |
+| Net income (cumulative, to end) | +88.91 | **+1,548.16** (fifo +798.16) |
+| Total cash | −29,996.09 | **+5,189.25** |
+| Opening / ending equity basis | 0.00 → 60,405.00 | **60,405.00 → 54,855.00** |
 | Opening / ending option cash | 0.00 → +320.00 | **+320.00 → 0.00** |
-| Open shares at end | 300 | 270 |
+| Open shares at end | 400 | 370 |
 | Reconciliation error | 0.000000 | 0.000000 |
 
 Plus:
@@ -349,8 +353,8 @@ Plus:
 - **as-of semantics** — in the June window `CCIV` is held at 100 and `LCID` is
   absent; in the full range the inverse. Proves the as-of view is real rather
   than a filtered final state.
-- **additivity** — `88.91 + 709.25 = 798.16` and
-  `−14,996.09 + 5,189.25 = −9,806.84`, both exact.
+- **additivity** — `88.91 + 1,459.25 = 1,548.16` and
+  `−29,996.09 + 5,189.25 = −24,806.84`, both exact.
 - **cumulative ≡ windowed** — `cumulative(end) − cumulative(start−1)` equals the
   windowed figure for every window tested.
 - **multi-lot fixture (new)** — a ticker with two buys before a sell, asserting
