@@ -14,21 +14,44 @@ unrelated options-research projects. Nothing here depends on them any more.
 
 ## Environment and tooling
 
-**Standard library only.** No dependencies, no virtualenv, no `pip install` —
-including the HTTP server, which is `http.server` rather than Flask precisely
-to keep this true. There is also no packaging, lint or format
-configuration — no `pyproject.toml`, `setup.py`, or `Makefile`. Don't go
-looking: `./rh-dashboard selftest` is the entire quality gate. The package is
-imported off `sys.path` by the repo-relative `rh-dashboard` executable, never
-installed.
+**Standard library plus exactly one dependency.** For most of this project's
+life there were none at all, and the rule was enforced by asserting that
+`requirements.txt` and `pyproject.toml` did not exist. That changed
+deliberately: **DuckDB** is the analytical store for the date-window work, and
+dependencies are managed with **uv**.
+
+What did *not* change is the reason the rule existed. The HTTP server is still
+`http.server` rather than Flask. There is still no lint or format
+configuration, no `Makefile`, and no packaging: `pyproject.toml` sets
+`[tool.uv] package = false`, so uv installs the dependencies but never builds
+or installs `rh_dashboard` itself, and the repo-relative `rh-dashboard`
+executable still imports it off `sys.path`. There is no `[project.scripts]`.
+The `version` in `pyproject.toml` is pinned to `0.0.0` and ignored — the real
+one lives in `rh_dashboard/__init__.py`.
+
+**Run the suite as `uv run ./rh-dashboard selftest`.** Bare `python3` still
+works for `build` and `serve` (neither imports DuckDB yet), but group 10 will
+fail without the venv, and it says so rather than raising an ImportError.
+
+The guard is now `.github/scripts/check_imports.py`: it walks every module
+under `rh_dashboard/` with `ast` and fails on any import outside
+`sys.stdlib_module_names` plus an explicit allowlist. This is **stricter** than
+the filename check it replaced — it catches an `import requests` added to a
+module, including one hidden inside a function body, which a filename check
+could never see. Adding a name to `ALLOWED` is the deliberate act that lets a
+new dependency in.
 
 The `Dockerfile` and `chart/` exist for a homelab deployment where statements
-live on a PVC. The image has no pip layer for the same reason.
+live on a PVC. The image copies the uv binary from `ghcr.io/astral-sh/uv` and
+runs `uv sync --frozen --no-dev` in its own layer, keyed on the lockfile, so a
+source edit does not re-resolve dependencies. `--frozen` everywhere means a
+build that would need to change `uv.lock` fails instead of silently upgrading
+DuckDB.
 `.github/workflows/ci.yml` has four jobs, and each one guards a rule stated
 elsewhere in this file:
 
-- **selftest** on 3.11-3.13. **Fails if a `requirements.txt` or
-  `pyproject.toml` ever appears** — the zero-dependency rule made enforceable.
+- **selftest** on 3.11-3.13. Runs `check_imports.py` first, then
+  `uv sync --frozen` and `uv run --frozen ./rh-dashboard selftest`.
   Then builds the sample page and greps it: no `<script src=`, no
   `rel="stylesheet"`, and **no `https?://` anywhere in the output HTML at
   all**. That last one is the easy trap — a documentation link, a source URL,
@@ -39,14 +62,16 @@ elsewhere in this file:
 - **CLI page is byte-stable** (PRs only): rebuilds `sample_data` at the merge
   base and at HEAD and diffs, ignoring the `Generated` timestamp. It *warns*
   rather than fails — read the annotation, don't assume green means unchanged.
+  Deliberately runs on bare `python3`, not uv: the merge base may predate the
+  dependency, and `build` needs none either way.
 - **helm**: `helm lint` plus `helm template` over every conditional path;
   asserts `--set auth.enabled=true` with no credentials **refuses** to render;
   and runs `.github/scripts/check_chart_auth_keys.py` over three rendered
   permutations to prove the Secret the chart writes and the Secret the
   Deployment reads carry the same keys — a mismatch renders valid YAML and
   only fails at pod start as `CreateContainerConfigError`. That script imports
-  `yaml`; it is CI-only tooling and does **not** breach the zero-dependency
-  rule, which covers what ships in `rh_dashboard/`.
+  `yaml`; it is CI-only tooling and is outside the import guard, which scans
+  `rh_dashboard/` only.
 - **image**: builds the container, runs `python -m rh_dashboard.cli selftest`
   *inside it*, then boots it and drives `/healthz` → `/api/upload` → `/`.
 
@@ -64,11 +89,11 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard build --filename jan.html             # rename the output file
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
-./rh-dashboard selftest                              # 313 assertions across 9 groups
+uv run ./rh-dashboard selftest                       # 318 assertions across 10 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 9 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 10 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real

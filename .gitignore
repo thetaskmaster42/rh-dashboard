@@ -6,3 +6,6 @@ output/*.html
 
 __pycache__/
 *.pyc
+
+# uv virtualenv — rebuilt from uv.lock, never committed.
+.venv/

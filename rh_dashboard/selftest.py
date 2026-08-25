@@ -43,7 +43,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 9
+GROUPS = 10
 
 
 def check(name, got, want, tol=0.005):
@@ -1075,6 +1075,48 @@ def _group_9_server():
         stop()
 
 
+def _group_10_store():
+    """The declared dependency, proven to actually load and work.
+
+    This exists so "the image builds" means something. DuckDB is the first
+    runtime dependency this project has ever had, and the interesting failure
+    is not a syntax error — it is a wheel that does not exist for the
+    interpreter or the architecture in front of it. The homelab is arm64, so
+    the assertion that matters is made *inside* the built container by the CI
+    image job, not only on a developer laptop.
+
+    Nothing in the pipeline imports DuckDB yet; the store lands with the
+    date-window work. Until then this is the whole of its surface.
+    """
+    group(10, "analytical store")
+    try:
+        import duckdb
+    except ImportError as e:                         # pragma: no cover - env
+        check(f"duckdb imports ({e}) — run `uv sync`, then "
+              f"`uv run ./rh-dashboard selftest`", False, True)
+        return
+
+    check("duckdb reports a version", bool(duckdb.__version__), True)
+    con = duckdb.connect(":memory:")
+    try:
+        check("duckdb evaluates a trivial query",
+              con.sql("select 42 as answer").fetchone(), (42,))
+        # A round trip through a real table, since that is what the store will
+        # do: the engine has to hold typed columns, not just answer literals.
+        con.execute("create table t (ticker varchar, qty double, d date)")
+        con.execute("insert into t values ('AAPL', 150.0, date '2026-07-05')")
+        row = con.sql("select ticker, qty, d from t").fetchone()
+        check("duckdb round-trips a typed row", (row[0], row[1]), ("AAPL", 150.0))
+        check("duckdb returns a real date", row[2], date(2026, 7, 5))
+        # Window functions are the reason for choosing it over hand-rolled
+        # aggregation; assert one works rather than assuming.
+        con.execute("insert into t values ('AAPL', 50.0, date '2026-07-06')")
+        running = con.sql("select sum(qty) over (order by d) from t order by d").fetchall()
+        check("duckdb computes a running total", [r[0] for r in running], [150.0, 200.0])
+    finally:
+        con.close()
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1085,6 +1127,7 @@ def run_selftest() -> bool:
     _group_7_reconciliation()
     _group_8_dashboard()
     _group_9_server()
+    _group_10_store()
 
     print()
     if FAILS:

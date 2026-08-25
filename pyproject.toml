@@ -1,0 +1,36 @@
+# Dependency manifest only. This project is deliberately NOT installable.
+#
+# `package = false` below makes it a uv "virtual" project: uv resolves and
+# installs the dependencies but never builds or installs `rh_dashboard`
+# itself. The repo-relative `rh-dashboard` executable keeps putting its own
+# directory on `sys.path` exactly as it always has, so nothing about how the
+# CLI resolves its input/output paths from `__file__` changes.
+#
+# There is no `[project.scripts]`, no build backend, and no packaging story.
+# If you find yourself adding one, the thing you actually want is probably
+# `uv run ./rh-dashboard <command>`.
+#
+# The file's existence used to fail CI outright — the zero-dependency rule was
+# enforced by asserting `pyproject.toml` did not exist. That proxy is replaced
+# by `.github/scripts/check_imports.py`, which enforces the real rule: nothing
+# under `rh_dashboard/` imports anything outside the standard library and the
+# allowlist. A stricter check, not a weaker one.
+[project]
+name = "rh-dashboard"
+# Not the release version — `rh_dashboard/__init__.py` holds that, and it is
+# what `--version` prints and what the release tag drives. Nothing consumes
+# this one (the project is never built or installed), but `[project]` requires
+# the field, so it is pinned low and deliberately ignored rather than kept in
+# sync with a second source of truth.
+version = "0.0.0"
+description = "P&L dashboard built from Robinhood statement CSVs"
+requires-python = ">=3.11"
+dependencies = [
+    # Analytical store for the date-window work: embedded, single file, no
+    # server to run and no second PVC to manage. Publishes manylinux aarch64
+    # wheels for CPython 3.10-3.14, which is what the arm64 homelab needs.
+    "duckdb>=1.5.0",
+]
+
+[tool.uv]
+package = false
