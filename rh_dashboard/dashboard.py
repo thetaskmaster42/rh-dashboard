@@ -21,8 +21,20 @@ from datetime import datetime, timezone
 from .assets import FAVICON_DATA_URI
 from .metrics import Metrics
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
-                    PRIMARY_CATEGORIES, TRANSFER_CATEGORIES, Category, CostBasis)
-from .positions import PositionsResult
+                    LOT_MATCHED_CATEGORIES, PRIMARY_CATEGORIES,
+                    TRANSFER_CATEGORIES, Category, CostBasis)
+from .positions import PositionsResult, _phase, _position_key
+
+# Rows that reach net income as their own cash. Lot-matched categories are
+# excluded because only a closing row contributes, and it contributes realized
+# P&L rather than proceeds — see `_row_income`.
+_INCOME_ROW_CATEGORIES = tuple(
+    c for c in INCOME_CATEGORIES if c not in LOT_MATCHED_CATEGORIES
+) + FALLBACK_CATEGORIES
+
+# The by-ticker table calls it Unattributed; the row filter needs the same name
+# so selecting it in the dropdown picks out exactly those rows.
+UNATTRIBUTED_KEY = "Unattributed"
 from .render import esc, render_bar_chart, render_line_chart
 
 _SLOT_VAR = {
@@ -180,7 +192,31 @@ td.muted { color: var(--text-secondary); opacity: .55; }
 .neg { color: var(--bad-text); }
 .neutral { color: var(--text-primary); }
 
-.filter-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 8px; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  margin: 24px 0 4px; }
+.control { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+  color: var(--text-secondary); }
+.control select { font: inherit; color: var(--text-primary); padding: 5px 8px;
+  border-radius: 7px; border: 1px solid var(--border); background: var(--surface-1); }
+.control input[type=checkbox] { accent-color: var(--series-1); }
+.filter-count { font-size: 11.5px; color: var(--text-secondary); }
+.legend-chip { cursor: default; }
+dialog#drill { width: min(860px, 92vw); max-height: 82vh; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--surface-1); color: var(--text-primary);
+  padding: 20px; }
+dialog#drill::backdrop { background: rgba(0,0,0,.45); }
+.drill-head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; margin: 0 0 4px; }
+.drill-head h3 { margin: 0; font-size: 15px; }
+.drill-head button { font: inherit; padding: 5px 12px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text-primary); cursor: pointer; }
+tr.drill { cursor: pointer; }
+tr.drill:hover { background: var(--surface-2); }
+#drill table { width: 100%; border-collapse: collapse; }
+.sortable th { cursor: pointer; user-select: none; }
+.sortable th[data-dir]::after { content: ' \2195'; opacity: .45; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
   border-radius: 999px; border: 1px solid var(--border); background: var(--surface-1);
@@ -188,7 +224,6 @@ td.muted { color: var(--text-secondary); opacity: .55; }
   transition: opacity .12s ease;
 }
 .chip .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
-.chip[data-active="false"] { opacity: 0.4; }
 .chip:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
 
 .chart-wrap { width: 100%; }
@@ -296,36 +331,124 @@ JS = """
       { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  var catSel = document.getElementById('f-cat');
+  var tickerSel = document.getElementById('f-ticker');
+  var outsideBox = document.getElementById('f-outside');
+  var countEl = document.getElementById('f-count');
+
+  // An empty selection means "all", which is why the chart filter below tests
+  // for it explicitly rather than looking a key up in a map of booleans.
   function activeKeys() {
+    var want = catSel ? catSel.value : '';
     var active = {};
     document.querySelectorAll('.chip[data-key]').forEach(function (chip) {
-      active[chip.getAttribute('data-key')] = chip.getAttribute('data-active') !== 'false';
+      var k = chip.getAttribute('data-key');
+      active[k] = (want === '' || k === want);
     });
     return active;
   }
 
   function applyFilter() {
-    var active = activeKeys();
+    var cat = catSel ? catSel.value : '';
+    var ticker = tickerSel ? tickerSel.value : '';
+    var showOutside = outsideBox ? outsideBox.checked : true;
+
     document.querySelectorAll('[data-chart] [data-key]').forEach(function (el) {
-      el.style.display = active[el.getAttribute('data-key')] === false ? 'none' : '';
+      var k = el.getAttribute('data-key');
+      el.style.display = (cat === '' || k === cat) ? '' : 'none';
     });
+
+    var shown = 0, total = 0;
     document.querySelectorAll('#txn-table tbody tr[data-key]').forEach(function (tr) {
-      tr.classList.toggle('hidden-row', active[tr.getAttribute('data-key')] === false);
+      total += 1;
+      var hide = (cat !== '' && tr.getAttribute('data-key') !== cat)
+              || (ticker !== '' && tr.getAttribute('data-ticker') !== ticker)
+              || (!showOutside && tr.getAttribute('data-in-window') === 'false');
+      tr.classList.toggle('hidden-row', hide);
+      if (!hide) { shown += 1; }
+    });
+    if (countEl) {
+      countEl.textContent = (shown === total)
+        ? total + ' transactions'
+        : shown + ' of ' + total + ' transactions';
+    }
+    // The legend dims what the chart is no longer drawing, so the two agree.
+    document.querySelectorAll('.legend-chip[data-key]').forEach(function (chip) {
+      chip.style.opacity = (cat === '' || chip.getAttribute('data-key') === cat)
+        ? '' : '.35';
     });
   }
 
-  document.querySelectorAll('.chip[data-key]').forEach(function (chip) {
-    function toggle() {
-      var on = chip.getAttribute('data-active') !== 'false';
-      chip.setAttribute('data-active', on ? 'false' : 'true');
-      chip.setAttribute('aria-checked', on ? 'false' : 'true');
-      applyFilter();
-    }
-    chip.addEventListener('click', toggle);
-    chip.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  // ---- per-ticker drill-down -------------------------------------------
+  // Built from the transaction rows themselves, in date order, accumulating
+  // the same data-income the by-ticker table was totalled from. The last
+  // Cumulative value is therefore that ticker's Net contribution by
+  // construction, not by a second calculation that could disagree.
+  var drill = document.getElementById('drill');
+  var drillBody = document.getElementById('drill-body');
+
+  function openDrill(ticker) {
+    if (!drill || !drill.showModal) { return; }
+    var rows = Array.prototype.slice.call(
+      document.querySelectorAll('#txn-table tbody tr[data-ticker="' + ticker + '"]'));
+    rows.sort(function (a, b) {
+      return a.getAttribute('data-date').localeCompare(b.getAttribute('data-date'));
+    });
+    var running = 0, html = '';
+    rows.forEach(function (tr) {
+      var cells = tr.children;
+      var income = parseFloat(tr.getAttribute('data-income')) || 0;
+      running += income;
+      var outside = tr.getAttribute('data-in-window') === 'false';
+      html += '<tr' + (outside ? ' class="excluded"' : '') + '>'
+        + '<td>' + cells[0].textContent + (outside ? ' *' : '') + '</td>'
+        + '<td>' + cells[3].textContent + '</td>'
+        + '<td>' + cells[2].textContent + '</td>'
+        + '<td class="num">' + cells[6].textContent + '</td>'
+        + '<td class="num">' + (income ? fmtMoney(income) : '\u2014') + '</td>'
+        + '<td class="num">' + fmtMoney(running) + '</td></tr>';
+    });
+    document.getElementById('drill-title').textContent = ticker;
+    document.getElementById('drill-sub').textContent =
+      rows.length + ' transaction(s), cumulative net income ' + fmtMoney(running)
+      + '. Buying contributes nothing until the position is sold.';
+    drillBody.innerHTML = html;
+    drill.showModal();
+  }
+
+  document.querySelectorAll('tr.drill[data-ticker]').forEach(function (tr) {
+    tr.addEventListener('click', function () {
+      openDrill(tr.getAttribute('data-ticker'));
     });
   });
+
+  // ---- sortable by-ticker rollup ---------------------------------------
+  document.querySelectorAll('table.sortable').forEach(function (table) {
+    var heads = Array.prototype.slice.call(table.tHead.rows[0].cells);
+    heads.forEach(function (th, idx) {
+      th.addEventListener('click', function () {
+        var dir = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
+        heads.forEach(function (h) { h.setAttribute('data-dir', ''); });
+        th.setAttribute('data-dir', dir);
+        var body = table.tBodies[0];
+        var rows = Array.prototype.slice.call(body.rows);
+        rows.sort(function (a, b) {
+          var x = a.cells[idx].textContent.trim();
+          var y = b.cells[idx].textContent.trim();
+          var nx = parseFloat(x.replace(/[$,\u2014]/g, ''));
+          var ny = parseFloat(y.replace(/[$,\u2014]/g, ''));
+          var cmp = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+          return dir === 'asc' ? cmp : -cmp;
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+      });
+    });
+  });
+
+  if (catSel) { catSel.addEventListener('change', applyFilter); }
+  if (tickerSel) { tickerSel.addEventListener('change', applyFilter); }
+  if (outsideBox) { outsideBox.addEventListener('change', applyFilter); }
+  applyFilter();
 
   function lineInteraction(card, svg, tooltip, data) {
     var crosshair = svg.querySelector('.viz-crosshair');
@@ -592,8 +715,9 @@ def _as_of(m: Metrics) -> str:
 
 def _ticker_row(t, is_total: bool = False, label: str | None = None) -> str:
     name = label if label is not None else (t.ticker or "Unattributed")
-    cls = ' class="subtotal"' if is_total else (
-        ' class="excluded"' if t.is_unattributed else "")
+    classes = ["subtotal"] if is_total else (["excluded"] if t.is_unattributed else [])
+    classes.append("drill")
+    cls = f' class="{" ".join(classes)}" data-ticker="{esc(t.ticker or UNATTRIBUTED_KEY)}"'
     held = f"{t.shares:g}" if t.shares else ""
     avg = _money(t.avg_price) if t.shares else ""
     def cell(v):
@@ -635,12 +759,13 @@ def _by_ticker_section(m: Metrics) -> str:
       costs belong to no ticker and are named <em>Unattributed</em> rather than spread
       across them &mdash; which is why this column still adds up to net income.</p>
     <div class="table-scroll">
-    <table class="data">
+    <table class="data sortable" id="ticker-table">
       <thead><tr>
-        <th>Ticker</th><th class="num">Shares</th><th class="num">Avg cost</th>
-        <th class="num">Equity</th><th class="num">Options</th>
-        <th class="num">Dividends</th><th class="num">Other</th>
-        <th class="num">Net contribution</th>
+        <th data-dir="">Ticker</th><th class="num" data-dir="">Shares</th>
+        <th class="num" data-dir="">Avg cost</th>
+        <th class="num" data-dir="">Equity</th><th class="num" data-dir="">Options</th>
+        <th class="num" data-dir="">Dividends</th><th class="num" data-dir="">Other</th>
+        <th class="num" data-dir="">Net contribution</th>
       </tr></thead>
       <tbody>{"".join(rows)}</tbody>
       <tfoot><tr class="subtotal">
@@ -730,6 +855,89 @@ def _chart_card(title: str, sub: str, svg: str, interaction: dict, chart_id: str
         f'</div>')
 
 
+def _txn_heading(m: Metrics, in_window: list, table_rows: list) -> str:
+    if m.window and len(table_rows) != len(in_window):
+        return (f"Transactions in window ({len(in_window)} of "
+                f"{len(table_rows)})")
+    return f"All transactions ({len(table_rows)})"
+
+
+def _txn_sub_head(m: Metrics) -> str:
+    base = ("Every row after de-duplication, newest first. Use the dropdowns above to "
+            "filter by category or ticker. Amount is raw cash as it appears in the "
+            "statement; <em>To net income</em> in a ticker's breakdown is the realized "
+            "figure, which is why a purchase contributes nothing.")
+    if m.window:
+        return (base + " Rows outside the window are hidden by default — show them to "
+                "see the purchase behind a sale that this window reports a gain on.")
+    return base
+
+
+def _drill_dialog() -> str:
+    """An empty shell the page fills in from rows it already has.
+
+    Nothing is duplicated into it at build time. The transaction table already
+    carries every row with its ticker and its contribution to net income, so
+    the dialog is assembled from those on click — which keeps the file the same
+    size whether it holds five tickers or fifty, and guarantees the drill-down
+    can never disagree with the table it came from.
+    """
+    return """<dialog id="drill">
+      <form method="dialog" class="drill-head">
+        <h3 id="drill-title"></h3><button value="close">Close</button>
+      </form>
+      <p class="sub-head" id="drill-sub"></p>
+      <div class="table-scroll"><table class="data"><thead><tr>
+        <th>Date</th><th>Code</th><th>Description</th>
+        <th class="num">Amount</th><th class="num">To net income</th>
+        <th class="num">Cumulative</th>
+      </tr></thead><tbody id="drill-body"></tbody></table></div>
+    </dialog>"""
+
+
+def _controls(m: Metrics, include_other: bool) -> str:
+    """Category and ticker dropdowns, plus the out-of-window toggle.
+
+    The chips became a legend. They were doing two jobs — explaining the chart
+    colours and filtering — and a dropdown says "pick one" far more clearly
+    than eight independently-toggleable pills, which had no visible notion of
+    "all" and no obvious starting state.
+    """
+    cats, seen = [], set()
+    for c in CATEGORY_ORDER:
+        key = display_key(c)
+        if key in seen or (key == OTHER_KEY and not include_other):
+            continue
+        seen.add(key)
+        cats.append(f'<option value="{esc(key)}">{esc(key)}</option>')
+
+    tickers = [t.ticker for t in m.by_ticker]
+    if abs(m.unattributed.net_contribution) > 0.005:
+        tickers.append(UNATTRIBUTED_KEY)
+    opts = "".join(f'<option value="{esc(t)}">{esc(t)}</option>'
+                   for t in sorted(tickers))
+
+    window_toggle = ""
+    if m.window:
+        # Under a window the transaction table shows only what falls inside it,
+        # which leaves a sale with no visible purchase behind it. One click has
+        # to be able to reveal the row that explains the number.
+        window_toggle = (
+            '<label class="control"><input type="checkbox" id="f-outside">'
+            '<span>Show rows outside the window</span></label>')
+
+    return f"""<div class="controls">
+      <label class="control"><span>Category</span>
+        <select id="f-cat"><option value="">All categories</option>
+        {"".join(cats)}</select></label>
+      <label class="control"><span>Ticker</span>
+        <select id="f-ticker"><option value="">All tickers</option>
+        {opts}</select></label>
+      {window_toggle}
+      <span class="filter-count" id="f-count"></span>
+    </div>"""
+
+
 def _legend_chips(include_other: bool) -> str:
     parts, seen = [], set()
     for c in CATEGORY_ORDER:
@@ -738,27 +946,74 @@ def _legend_chips(include_other: bool) -> str:
             continue
         seen.add(key)
         parts.append(
-            f'<div class="chip" data-key="{esc(key)}" data-active="true" '
-            f'role="checkbox" aria-checked="true" tabindex="0">'
+            f'<div class="chip legend-chip" data-key="{esc(key)}">'
             f'<span class="swatch" style="background:{category_color(c)}"></span>'
             f'{esc(key)}</div>')
     parts.append(
-        f'<div class="chip" data-key="Net income" data-active="true" role="checkbox" '
-        f'aria-checked="true" tabindex="0"><span class="swatch" '
-        f'style="background:{TOTAL_COLOR}"></span>Net income</div>')
+        f'<div class="chip legend-chip" data-key="Net income">'
+        f'<span class="swatch" style="background:{TOTAL_COLOR}"></span>'
+        f'Net income</div>')
     return "\n".join(parts)
 
 
-def _transactions_table(classified) -> str:
+def _row_income(classified, positions, window=None) -> dict[tuple[str, int], float]:
+    """What each row contributed to net income, keyed by (source file, row index).
+
+    Not the row's cash. For a lot-matched category only a *closing* row carries
+    income, and it carries the realized P&L rather than the proceeds — a sale
+    of shares bought for $18,000 at $9,500 is a gain, not $9,500 of income.
+    Everything else in an income category contributes its raw amount, and
+    transfers and corporate actions contribute nothing at all.
+
+    Events are paired to rows by walking both in the engine's own sort order
+    and consuming them in turn, so two identical closes on one day pair with
+    the right rows rather than by a key that cannot tell them apart.
+
+    Under a window, a row outside it contributes **nothing to this report**,
+    whatever its category. Realized events are already filtered, so the trades
+    handle themselves; a dividend is not, and would otherwise let June's income
+    accumulate into a July drill-down while June's sale did not — two rows on
+    the same page disagreeing about which period they belong to.
+    """
+    pending: dict[tuple, list[float]] = {}
+    for e in positions.realized_events:
+        pending.setdefault((e.activity_date, e.key, e.category), []).append(e.amount)
+
+    out: dict[tuple[str, int], float] = {}
+    ordered = sorted(classified, key=lambda c: (c.txn.activity_date, _phase(c),
+                                                 c.txn.source_file, c.txn.row_index))
+    for c in ordered:
+        ident = (c.txn.source_file, c.txn.row_index)
+        if window is not None and not window.contains(c.txn.activity_date):
+            out[ident] = 0.0
+            continue
+        if c.category in LOT_MATCHED_CATEGORIES:
+            queue = pending.get((c.txn.activity_date, _position_key(c), c.category))
+            out[ident] = queue.pop(0) if queue else 0.0
+        elif c.category in _INCOME_ROW_CATEGORIES:
+            out[ident] = c.txn.amount
+        else:
+            out[ident] = 0.0
+    return out
+
+
+def _transactions_table(classified, positions, window=None) -> str:
+    income = _row_income(classified, positions, window)
     rows = sorted(classified, key=lambda c: (c.txn.activity_date, c.txn.source_file,
                                               c.txn.row_index), reverse=True)
     body = []
     for c in rows:
         t = c.txn
+        contributed = income.get((t.source_file, t.row_index), 0.0)
+        in_window = window is None or window.contains(t.activity_date)
         flag = ('<span class="fallback-flag" title="unrecognised trans code — '
                 'bucketed by cash sign">&nbsp;†</span>') if c.fallback else ""
         body.append(
-            f'<tr data-key="{esc(display_key(c.category))}">'
+            f'<tr data-key="{esc(display_key(c.category))}" '
+            f'data-ticker="{esc(t.instrument.strip() or UNATTRIBUTED_KEY)}" '
+            f'data-date="{t.activity_date.isoformat()}" '
+            f'data-income="{contributed:.2f}" '
+            f'data-in-window="{"true" if in_window else "false"}">'
             f'<td>{t.activity_date.isoformat()}</td>'
             f'<td class="ticker">{esc(t.instrument)}</td>'
             f'<td>{esc(t.description)}</td>'
@@ -782,7 +1037,8 @@ def _transactions_table(classified) -> str:
 def build_page(m: Metrics, positions: PositionsResult, classified: list,
                files_read: list[str], row_errors: list[str],
                interactive: bool = False,
-               cost_basis: CostBasis = CostBasis.AVERAGE) -> str:
+               cost_basis: CostBasis = CostBasis.AVERAGE,
+               all_rows: list | None = None) -> str:
     """
     Render the whole page.
 
@@ -790,6 +1046,12 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
     `server.py`. Left false — the CLI path — not one byte of the output
     changes, so a dashboard built on the command line never ships a button
     that posts to a server the file has no way to reach.
+
+    `all_rows` is every row the statements carry, where `classified` is only
+    those inside the window. The transaction table renders `all_rows` and marks
+    which fall inside, because a window that hides the June purchase behind a
+    July sale leaves the reader unable to check the number they are being
+    shown. Everything that *counts* still comes from `classified`.
 
     `cost_basis` is stated on the page rather than merely applied to it. Two
     dashboards built from the same statements under different settings look
@@ -898,6 +1160,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
             f"{s.count} {'transfer' if s.count == 1 else 'transfers'} · not income",
             swatch=category_color(c), neutral=True, inset=True))
 
+    table_rows = all_rows if all_rows is not None else classified
     extra_css = INTERACTIVE_CSS if interactive else ""
     extra_js = INTERACTIVE_JS if interactive else ""
     actions_html = _header_actions() if interactive else ""
@@ -927,9 +1190,11 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
   {_open_positions_section(m, positions)}
 
   {_by_ticker_section(m)}
+  {_drill_dialog()}
 
   <section class="kpi-row">{"".join(kpis)}</section>
 
+  {_controls(m, bool(m.other_count))}
   <div class="filter-row">{_legend_chips(bool(m.other_count))}</div>
 
   {_chart_card("Cumulative net income over time",
@@ -945,10 +1210,9 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
                bar_svg, bar_data, "bar")}
 
   <div class="card">
-    <h2>All transactions ({len(classified)})</h2>
-    <p class="sub-head">Every row after de-duplication, newest first. Toggle a category
-      chip above to filter. Amount is raw cash as it appears in the statement.</p>
-    <div class="table-scroll">{_transactions_table(classified)}</div>
+    <h2>{_txn_heading(m, classified, table_rows)}</h2>
+    <p class="sub-head">{_txn_sub_head(m)}</p>
+    <div class="table-scroll">{_transactions_table(table_rows, positions, m.window)}</div>
   </div>
 
   <footer>
