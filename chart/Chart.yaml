@@ -2,8 +2,8 @@ apiVersion: v2
 name: rh-dashboard
 description: Robinhood statement P&L dashboard — reads statement CSVs from a volume and serves a self-contained dashboard
 type: application
-version: 0.1.0
-appVersion: "1.0.0"
+version: 1.0.2
+appVersion: "1.0.2"
 home: https://github.com/thetaskmaster42/rh-dashboard
 keywords:
   - dashboard
