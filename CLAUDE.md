@@ -72,6 +72,13 @@ elsewhere in this file:
   only fails at pod start as `CreateContainerConfigError`. That script imports
   `yaml`; it is CI-only tooling and is outside the import guard, which scans
   `rh_dashboard/` only.
+  Two JavaScript steps run here and **not** in `selftest`, because the
+  container has no node: `node --check` on the extracted inline script, and
+  `.github/scripts/render_charts.js`, which runs the page's own script against
+  a stub DOM and asserts the chart drew axes, grid lines, dated labels and data
+  marks. The second exists because parsing is not rendering — a selector typo,
+  a scale that divides by zero, or an axis yielding no ticks all parse
+  perfectly and leave an empty `<svg>`.
 - **image**: builds the container, runs `python -m rh_dashboard.cli selftest`
   *inside it*, then boots it and drives `/healthz` → `/api/upload` → `/`.
 

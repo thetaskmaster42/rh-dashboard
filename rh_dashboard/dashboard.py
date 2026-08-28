@@ -265,8 +265,15 @@ td.muted { color: var(--text-secondary); opacity: .55; }
   border-radius: 6px; background: transparent; color: var(--text-secondary);
   cursor: pointer; }
 .chart-btn.is-active { background: var(--surface-1); color: var(--text-primary); }
-.perf-chart svg { width: 100%; height: 240px; display: block; }
-.axis-zero { stroke: var(--baseline); stroke-width: 1; }
+.perf-chart svg { width: 100%; height: auto; display: block; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.axis-zero { stroke: var(--baseline); stroke-width: 1.4; }
+.axis-label { fill: var(--text-muted); font-size: 11px; }
+.axis-label.y { text-anchor: end; dominant-baseline: middle; }
+.axis-label.x { text-anchor: middle; }
+.cum-dot { stroke: none; }
+.cum-dot.pos { fill: var(--gain); }
+.cum-dot.neg { fill: var(--loss); }
 .bar-pos { fill: var(--gain); }
 .bar-neg { fill: var(--loss); }
 .cum-line { fill: none; stroke-width: 2.5; stroke-linejoin: round;
@@ -512,36 +519,87 @@ JS = """
     return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  // A zero line that sits where zero actually is, not at the floor.
-  function scale(values, h, pad) {
-    var hi = Math.max.apply(null, values.concat([0]));
-    var lo = Math.min.apply(null, values.concat([0]));
-    if (hi === lo) { hi = 1; lo = -1; }
-    var span = hi - lo;
-    return { hi: hi, lo: lo,
-      y: function (v) { return pad + (hi - v) / span * (h - 2 * pad); } };
+  // ---- chart geometry ---------------------------------------------------
+  // Margins, because the axes need somewhere to live. preserveAspectRatio is
+  // NOT "none" on these: that stretches the viewBox to fill the width and
+  // takes every text node with it, so the labels would render squashed.
+  var CH = { W: 900, H: 300, L: 66, R: 14, T: 14, B: 34 };
+  CH.x0 = CH.L; CH.x1 = CH.W - CH.R; CH.y0 = CH.T; CH.y1 = CH.H - CH.B;
+
+  // Round numbers a person would actually choose, about `target` of them.
+  // A fixed axis cannot work here: the same page has to read sensibly whether
+  // the biggest day is $200 or $200,000.
+  function niceTicks(lo, hi, target) {
+    if (hi === lo) { hi = lo + 1; }
+    var raw = (hi - lo) / target;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var n = raw / mag;
+    var step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+    var out = [], v = Math.floor(lo / step) * step;
+    var last = Math.ceil(hi / step) * step;
+    for (; v <= last + step * 1e-9; v += step) { out.push(Math.round(v * 1e6) / 1e6); }
+    return out;
+  }
+
+  function fmtTick(v) {
+    var a = Math.abs(v);
+    if (a >= 1000) { return (v < 0 ? '-' : '') + (a / 1000) + 'k'; }
+    return String(v);
+  }
+
+  function fmtDay(iso) {
+    var names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var p = iso.split('-');
+    return names[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10);
+  }
+
+  // Grid, y labels and a readable number of dated x labels. Returns the value
+  // scale so the caller can place its own marks against the same axis.
+  function drawAxes(svg, values, series) {
+    var ticks = niceTicks(Math.min.apply(null, values.concat([0])),
+                          Math.max.apply(null, values.concat([0])), 5);
+    var lo = ticks[0], hi = ticks[ticks.length - 1];
+    function y(v) { return CH.y1 - (v - lo) / (hi - lo) * (CH.y1 - CH.y0); }
+    var out = '';
+    ticks.forEach(function (t) {
+      var yy = y(t).toFixed(2);
+      out += '<line x1="' + CH.x0 + '" x2="' + CH.x1 + '" y1="' + yy + '" y2="' + yy +
+        '" class="' + (t === 0 ? 'axis-zero' : 'grid-line') + '"></line>' +
+        '<text x="' + (CH.x0 - 9) + '" y="' + yy + '" class="axis-label y">' +
+        esc(fmtTick(t)) + '</text>';
+    });
+    // Roughly one label per 110px of plot width, so a year does not overlap.
+    var maxLabels = Math.max(2, Math.floor((CH.x1 - CH.x0) / 110));
+    var stride = Math.max(1, Math.ceil(series.length / maxLabels));
+    var slot = (CH.x1 - CH.x0) / Math.max(series.length, 1);
+    series.forEach(function (d, i) {
+      if (i % stride && i !== series.length - 1) { return; }
+      var xx = CH.x0 + i * slot + slot / 2;
+      if (xx > CH.x1 - 4) { xx = CH.x1 - 4; }
+      out += '<text x="' + xx.toFixed(2) + '" y="' + (CH.y1 + 20) +
+        '" class="axis-label x">' + esc(fmtDay(d[0])) + '</text>';
+    });
+    svg.innerHTML = out;
+    return { y: y, slot: slot };
   }
 
   function drawDaily(series) {
     var svg = document.getElementById('perf-chart');
     if (!svg) { return; }
-    var W = 900, H = 260, PAD = 16;
-    var sc = scale(series.map(function (d) { return d[1]; }), H, PAD);
-    var zero = sc.y(0);
-    var slot = W / Math.max(series.length, 1);
-    var bw = Math.max(1.5, Math.min(26, slot * 0.62));
-    var out = '<line x1="0" x2="' + W + '" y1="' + zero.toFixed(2) +
-      '" y2="' + zero.toFixed(2) + '" class="axis-zero"></line>';
+    var ax = drawAxes(svg, series.map(function (d) { return d[1]; }), series);
+    var zero = ax.y(0);
+    var bw = Math.max(1.5, Math.min(26, ax.slot * 0.62));
+    var out = svg.innerHTML;
     series.forEach(function (d, i) {
       var v = d[1];
       if (Math.abs(v) < 0.005) { return; }
-      var y = sc.y(v);
-      var top = Math.min(y, zero), hgt = Math.max(1.5, Math.abs(y - zero));
-      out += '<rect x="' + (i * slot + (slot - bw) / 2).toFixed(2) +
+      var yv = ax.y(v);
+      var top = Math.min(yv, zero), hgt = Math.max(1.5, Math.abs(yv - zero));
+      out += '<rect x="' + (CH.x0 + i * ax.slot + (ax.slot - bw) / 2).toFixed(2) +
         '" y="' + top.toFixed(2) + '" width="' + bw.toFixed(2) +
         '" height="' + hgt.toFixed(2) + '" rx="2" class="' +
         (v >= 0 ? 'bar-pos' : 'bar-neg') + '"><title>' +
-        esc(d[0] + ': ' + fmtMoney(v)) + '</title></rect>';
+        esc(fmtDay(d[0]) + ': ' + fmtMoney(v)) + '</title></rect>';
     });
     svg.innerHTML = out;
   }
@@ -549,18 +607,25 @@ JS = """
   function drawCumulative(series) {
     var svg = document.getElementById('perf-chart');
     if (!svg) { return; }
-    var W = 900, H = 260, PAD = 16;
-    var sc = scale(series.map(function (d) { return d[1]; }), H, PAD);
-    var zero = sc.y(0);
-    var step = series.length > 1 ? W / (series.length - 1) : 0;
+    var ax = drawAxes(svg, series.map(function (d) { return d[1]; }), series);
+    var step = series.length > 1 ? (CH.x1 - CH.x0) / (series.length - 1) : 0;
     var pts = series.map(function (d, i) {
-      return (i * step).toFixed(2) + ',' + sc.y(d[1]).toFixed(2);
+      return (CH.x0 + i * step).toFixed(2) + ',' + ax.y(d[1]).toFixed(2);
     }).join(' ');
     var last = series.length ? series[series.length - 1][1] : 0;
-    svg.innerHTML = '<line x1="0" x2="' + W + '" y1="' + zero.toFixed(2) +
-      '" y2="' + zero.toFixed(2) + '" class="axis-zero"></line>' +
+    var out = svg.innerHTML +
       '<polyline points="' + pts + '" class="cum-line ' +
       (last >= 0 ? 'pos' : 'neg') + '"></polyline>';
+    // A dot per point would be noise over a year; mark only the days that
+    // actually moved the line, which are the days something closed.
+    series.forEach(function (d, i) {
+      if (i && Math.abs(d[1] - series[i - 1][1]) < 0.005) { return; }
+      out += '<circle cx="' + (CH.x0 + i * step).toFixed(2) + '" cy="' +
+        ax.y(d[1]).toFixed(2) + '" r="3" class="cum-dot ' +
+        (last >= 0 ? 'pos' : 'neg') + '"><title>' +
+        esc(fmtDay(d[0]) + ': ' + fmtMoney(d[1])) + '</title></circle>';
+    });
+    svg.innerHTML = out;
   }
 
   function setPeriod(key) {
@@ -1349,7 +1414,7 @@ def _performance_section(periods: list, anchor: str) -> str:
                     type="button">Daily</button>
           </span>
         </figcaption>
-        <svg id="perf-chart" viewBox="0 0 900 260" preserveAspectRatio="none"
+        <svg id="perf-chart" viewBox="0 0 900 300"
              role="img" aria-label="Realized profit and loss"></svg>
       </figure>
       <p class="perf-note">Periods run back from <strong>{esc(anchor)}</strong>, the
