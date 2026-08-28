@@ -34,7 +34,7 @@ from pathlib import Path
 from .categorize import categorize, categorize_all
 from .dedupe import dedupe
 from .loader import LoadError, load_file, load_folder
-from .metrics import compute
+from .metrics import TradeStats, compute
 from .model import Category, Classified, CostBasis, Transaction, Window
 from .pipeline import build_dashboard
 from .positions import compute_positions, compute_windowed, normalise_contract
@@ -504,19 +504,31 @@ def _group_3_fifo():
 # on 06/04 — which is the only shape where the two cost bases can disagree.
 # Everything else in the fixture is single-lot and reads the same either way.
 #
+# MSFT is bought and sold at a LOSS, and TSLA carries an option ROLLOVER:
+# a put sold 07/10 is bought back 07/24 for more than it brought in (a loss,
+# realized that day) while a further-dated put is sold the same day and stays
+# open. So the fixture closes five trades — three winners, two losers — and
+# ends with an open short option.
+#
 #   AAPL blended cost  (100*180 + 100*150) / 200                     -> $165.00
 #   AAPL realized      average: (190-165)*50                         -> +1,250
 #                      fifo:    (190-180)*50, oldest lot first       ->   +500
 #   SPY realized       (560-550)*10                                  ->   +100
-#   Equity realized    average 1,250+100 = +1,350 ; fifo 500+100     ->   +600
-#   Options realized   STO +320 then BTC -110 on one contract        ->   +210
+#   MSFT realized      (380-400)*20                                  ->   -400
+#   Equity realized    average 1,250+100-400 ; fifo 500+100-400      -> +950/+200
+#   AAPL option        STO +320 then BTC -110                        ->   +210
+#   TSLA option        STO +450 then BTC -600 (the closed roll leg)  ->   -150
+#   Options realized   210 - 150                                     ->    +60
+#   Open option        the 9/18 put sold in the roll, still open     ->   +725
 #   Div/Interest       CDIV 8.75 + MDIV 3.10                         -> +11.85
 #   Fees               AFEE                                          ->  -2.50
 #   Margin             INT (negative)                                -> -12.34
 #   Gold               GOLD -5.00 + GDBP -5.00                       -> -10.00
 #   Other              SLIP (no rule)                                ->  +1.15
-#   Net income         average 1350+210+11.85-2.50-12.34-10+1.15     -> +1,548.16
-#                      fifo     600+210+11.85-2.50-12.34-10+1.15     ->   +798.16
+#   Net income         average 950+60+11.85-2.50-12.34-10+1.15       ->   +998.16
+#                      fifo     200+60+11.85-2.50-12.34-10+1.15       ->   +248.16
+#   Trades             5 closes: +100 +1,250 +210 win; -400 -150 lose
+#                      win rate 60.00%; avg win 520.00; avg loss -275.00
 #
 # A corporate action is also present: CCIV 100 bought for $2,405, then
 # surrendered for 100 LCID the following month. It carries NO Amount, so it
@@ -534,33 +546,34 @@ def _group_3_fifo():
 # under both. That is the whole claim about cost basis in one number: it moves
 # P&L through time without creating or destroying any.
 #
-#   Total cash         both modes                                    -> -24,806.84
-#     average  1,548.16 - 54,855 + 0 + 28,500 = -24,806.84
-#     fifo       798.16 - 54,105 + 0 + 28,500 = -24,806.84
+#   Total cash         both modes                                    -> -24,631.84
+#     average    998.16 - 54,855 + 725 + 28,500 = -24,631.84
+#     fifo       248.16 - 54,105 + 725 + 28,500 = -24,631.84
 EXPECTED_INCOME = {                 # the default mode: average cost
-    Category.EQUITY: 1350.00,
-    Category.OPTIONS: 210.00,
+    Category.EQUITY: 950.00,
+    Category.OPTIONS: 60.00,
     Category.DIVIDENDS_INTEREST: 11.85,
     Category.FEES: -2.50,
     Category.MARGIN: -12.34,
     Category.GOLD: -10.00,
 }
 EXPECTED_COUNTS = {
-    Category.EQUITY: 8, Category.OPTIONS: 2, Category.DIVIDENDS_INTEREST: 2,
+    Category.EQUITY: 10, Category.OPTIONS: 5, Category.DIVIDENDS_INTEREST: 2,
     Category.FEES: 1, Category.MARGIN: 1, Category.GOLD: 2,
     Category.DEPOSITS: 2, Category.WITHDRAW: 1, Category.CORPORATE_ACTION: 2,
 }
-EXPECTED_NET_INCOME = 1548.16       # average cost
+EXPECTED_NET_INCOME = 998.16        # average cost
 EXPECTED_OPEN_SHARES = 370.0        # unchanged by the mode
 EXPECTED_OPEN_COST = 54855.00       # average cost
-EXPECTED_TOTAL_CASH = -24806.84     # unchanged by the mode
+EXPECTED_OPEN_OPTIONS = 725.00      # the roll's new leg, still open
+EXPECTED_TOTAL_CASH = -24631.84     # unchanged by the mode
 EXPECTED_DEPOSITS = 30500.00
 EXPECTED_WITHDRAW = -2000.00
 EXPECTED_OTHER = 1.15
 
 # The same fixture read the other way. Only three figures move.
-EXPECTED_FIFO_EQUITY = 600.00
-EXPECTED_FIFO_NET_INCOME = 798.16
+EXPECTED_FIFO_EQUITY = 200.00
+EXPECTED_FIFO_NET_INCOME = 248.16
 EXPECTED_FIFO_OPEN_COST = 54105.00
 
 
@@ -578,9 +591,9 @@ def _group_4_sample_totals():
     lr, dd, classified, positions, m = _sample_metrics()
 
     check("no row errors in the sample CSVs", len(lr.row_errors), 0)
-    check("24 raw rows across both files", len(lr.transactions), 24)
+    check("29 raw rows across both files", len(lr.transactions), 29)
     check("2 cross-file duplicates removed", dd.removed, 2)
-    check("22 transactions kept", len(dd.kept), 22)
+    check("27 transactions kept", len(dd.kept), 27)
     check("no lot-matching warnings on clean data", len(positions.warnings), 0)
     # corporate action rows carry no Amount and must survive the loader
     check("corporate action rows are loaded, not dropped as unparseable",
@@ -597,7 +610,8 @@ def _group_4_sample_totals():
     check("net income", m.net_income, EXPECTED_NET_INCOME)
     check("open shares held", m.open_shares, EXPECTED_OPEN_SHARES)
     check("open equity cost basis", m.open_equity_cost_basis, EXPECTED_OPEN_COST)
-    check("no open options", m.open_options_net_cash, 0.0)
+    check("the roll's new leg is still open",
+          m.open_options_net_cash, EXPECTED_OPEN_OPTIONS)
     check("total cash movement", m.total_cash_movement, EXPECTED_TOTAL_CASH)
     check("deposits", m.categories[Category.DEPOSITS].cash_total, EXPECTED_DEPOSITS)
     check("withdraw", m.categories[Category.WITHDRAW].cash_total, EXPECTED_WITHDRAW)
@@ -621,6 +635,46 @@ def _group_4_sample_totals():
           m.income_of(Category.EQUITY), EXPECTED_INCOME[Category.EQUITY])
     check("corporate action moved no cash",
           m.categories[Category.CORPORATE_ACTION].cash_total, 0.0)
+
+    # --- closed trades: three winners, two losers -------------------------
+    # A trade is one closing event, so the roll counts once — the leg that
+    # closed — while the further-dated put it opened stays uncounted.
+    t = m.trades
+    check("five trades closed", t.count, 5)
+    check("three of them won", len(t.wins), 3)
+    check("two of them lost", len(t.losses), 2)
+    check("win rate", t.win_rate, 60.00)
+    check("average win", t.avg_win, 520.00)              # (100+1250+210)/3
+    check("average loss", t.avg_loss, -275.00)           # (-400-150)/2
+    check("best trade", t.best, 1250.00)
+    check("worst trade", t.worst, -400.00)
+    check("opening a position is never a trade",
+          [x for x in (t.wins + t.losses + t.scratches) if x == 0.0], [])
+    # The tie that keeps the tiles honest: trades sum to the lot-matched income.
+    check("trades total the realized lot-matched income",
+          t.total, m.income_of(Category.EQUITY) + m.income_of(Category.OPTIONS))
+
+    # A trade that closes flat still happened, so it belongs in the
+    # denominator. No fixture row does this — asserted directly rather than
+    # left to a fixture that cannot distinguish the two definitions.
+    flat = TradeStats(wins=[100.0], losses=[-50.0], scratches=[0.0])
+    check("a scratch trade counts as a trade", flat.count, 3)
+    check("a scratch trade dilutes the win rate", flat.win_rate, 100.0 / 3)
+    check("a scratch trade is neither a win nor a loss",
+          (flat.avg_win, flat.avg_loss), (100.0, -50.0))
+    check("a scratch trade adds nothing to the total", flat.total, 50.0)
+
+    # --- daily realized series --------------------------------------------
+    days = dict(m.daily_realized)
+    check("the series spans every day of the range, not just active ones",
+          len(m.daily_realized), 57)                     # 2026-06-02 .. 2026-07-28
+    check("a quiet day is present at zero, not absent",
+          days.get("2026-06-11", "absent"), 0.0)
+    check("the winning days", [d for d, v in m.daily_realized if v > 0],
+          ["2026-06-10", "2026-07-05", "2026-07-08"])
+    check("the losing days", [d for d, v in m.daily_realized if v < 0],
+          ["2026-07-20", "2026-07-24"])
+    check("the daily series totals the trades", sum(days.values()), t.total)
 
     # --- the same fixture read under FIFO ---------------------------------
     # AAPL's two lots are what make this possible: the fixture used to agree
@@ -832,9 +886,9 @@ def _group_8_dashboard():
         check("...and it is not the default's figure",
               alt["net_income"] != res["net_income"], True)
         check("the FIFO page prints its own net income",
-              "$798.16" in alt_html, True)
+              "$248.16" in alt_html, True)
         check("the FIFO page does not print the average-cost figure",
-              "$1,548.16" in alt_html, False)
+              "$998.16" in alt_html, False)
         check("both pages agree on shares held",
               alt["open_shares"], res["open_shares"])
         for label in ("Net income", "Open positions", "Equity", "Options",
@@ -844,7 +898,7 @@ def _group_8_dashboard():
             check(f"page mentions {label}", label in html, True)
         check("page does not list the surrendered ticker as held",
               ">CCIV<" in html.split('id="txn-table"')[0], False)
-        check("page states the net income figure", "$1,548.16" in html, True)
+        check("page states the net income figure", "$998.16" in html, True)
         check("page states total shares held", "370 shares" in html, True)
         check("page states open cost basis", "$54,855.00" in html, True)
         check("page explains buying is not a loss",
@@ -1215,8 +1269,14 @@ def _group_11_window():
     lr = load_folder(SAMPLE)
     cls = categorize_all(dedupe(lr.transactions).kept)
     naive = compute_positions([c for c in cls if JULY.contains(c.txn.activity_date)])
+    # MSFT opens and closes inside July so it matches correctly either way;
+    # AAPL is the one whose purchase falls outside, and its +1,250 becomes
+    # +9,500 of bare proceeds. 9,500 - 400 is what the slice reports.
     check("slicing rows before matching invents a gain",
-          naive.realized(Category.EQUITY), 9500.0)
+          naive.realized(Category.EQUITY), 9100.0)
+    check("...specifically on the position whose purchase it cannot see",
+          [e.amount for e in naive.realized_events
+           if e.key == "AAPL" and e.category is Category.EQUITY], [9500.0])
     check("...and complains about an oversell it caused itself",
           any("more unit(s)" in w for w in naive.warnings), True)
 
@@ -1236,12 +1296,14 @@ def _group_11_window():
     check("june: reconciles", jun.reconciles, True)
     check("june: reconciliation error", jun.reconciliation_error, 0.0)
 
-    check("july: net income", jul.net_income, 1459.25)
-    check("july: total cash", jul.total_cash_movement, 5189.25)
+    check("july: net income", jul.net_income, 909.25)
+    check("july: total cash", jul.total_cash_movement, 5364.25)
     check("july: equity realized against the pre-window lots",
-          jul_pos.realized(Category.EQUITY), 1250.00)
-    check("july: the BTC closes June's short for its full credit",
-          jul_pos.realized(Category.OPTIONS), 210.00)
+          jul_pos.realized(Category.EQUITY), 850.00)     # AAPL +1,250, MSFT -400
+    check("july: options net the closed roll leg against June's short",
+          jul_pos.realized(Category.OPTIONS), 60.00)     # AAPL +210, TSLA -150
+    check("july: the roll's new leg is carried as open, not realized",
+          jul.open_options_net_cash, 725.00)
     check("july: opening basis is june's closing basis",
           jul.opening_equity_cost_basis, jun.open_equity_cost_basis)
     check("july: closing basis", jul.open_equity_cost_basis, 54855.00)
@@ -1249,6 +1311,18 @@ def _group_11_window():
     check("july: reconciles", jul.reconciles, True)
     check("july: reconciliation error", jul.reconciliation_error, 0.0)
 
+    # --- trades and the daily series narrow with the window ---------------
+    check("june closed one trade", jun.trades.count, 1)
+    check("june won all of it", jun.trades.win_rate, 100.00)
+    check("june's series covers june", len(jun.daily_realized), 30)
+    check("july closed four", jul.trades.count, 4)
+    check("july split them evenly", jul.trades.win_rate, 50.00)
+    check("july average win", jul.trades.avg_win, 730.00)        # (1250+210)/2
+    check("july average loss", jul.trades.avg_loss, -275.00)     # (-400-150)/2
+    check("july's series covers july", len(jul.daily_realized), 31)
+    check("july's trades total its lot-matched income",
+          jul.trades.total,
+          jul.income_of(Category.EQUITY) + jul.income_of(Category.OPTIONS))
     # --- as-of semantics: the inverse of what the full range reports -------
     # In June the exchange has not happened yet. This is the cleanest proof the
     # as-of view is real rather than a filtered final state.
@@ -1271,6 +1345,10 @@ def _group_11_window():
           (EXPECTED_NET_INCOME, EXPECTED_TOTAL_CASH, EXPECTED_OPEN_SHARES))
     check("a full-range window opens at zero",
           (full.opening_equity_cost_basis, full.opening_options_net_cash), (0.0, 0.0))
+    check("trades are additive across the two windows",
+          jun.trades.count + jul.trades.count, full.trades.count)
+    check("...and so is what they made",
+          jun.trades.total + jul.trades.total, full.trades.total)
 
     # --- months come from the window, not from the rows --------------------
     check("june months", jun.months, ["2026-06"])
@@ -1314,8 +1392,8 @@ def _group_11_window():
     # --- cost basis and windows compose ------------------------------------
     _, jul_f_pos, _, jul_f = _windowed(JULY, cost_basis=CostBasis.FIFO)
     check("july under fifo: equity realized",
-          jul_f_pos.realized(Category.EQUITY), 500.00)
-    check("july under fifo: net income", jul_f.net_income, 709.25)
+          jul_f_pos.realized(Category.EQUITY), 100.00)   # AAPL +500, MSFT -400
+    check("july under fifo: net income", jul_f.net_income, 159.25)
     check("july under fifo: closing basis", jul_f.open_equity_cost_basis, 54105.00)
     check("july under fifo: same cash as average cost",
           jul_f.total_cash_movement, jul.total_cash_movement)
@@ -1337,7 +1415,7 @@ def _group_12_window_page():
               res["window"], ("2026-07-01", "2026-07-31"))
         check("windowed build still reports the statements' own span",
               res["full_range"], ("2026-06-02", "2026-07-28"))
-        check("windowed build net income", res["net_income"], 1459.25)
+        check("windowed build net income", res["net_income"], 909.25)
         check("windowed build open shares", res["open_shares"], 370.0)
         check("windowed build reconciles", res["reconciles"], True)
 
@@ -1355,8 +1433,18 @@ def _group_12_window_page():
         # ...and this one is the either-endpoint guard: the short option is
         # fully closed inside the window, so it ends at zero. Testing only the
         # end would suppress a row carrying a real -$320.
+        check("the option row shows the roll moving the open credit",
+              "Open option cash $320.00 \u2192 $725.00" in html, True)
+
+        # The either-endpoint guard needs a position that ends at ZERO: this
+        # window opens holding June's short and closes just after it is bought
+        # back, before the roll opens a new one. Guarding on the end value
+        # alone would drop a row carrying a real -$320.
+        closed = build_dashboard(input_dir=SAMPLE, output_dir=tmp, filename="c.html",
+                                 start=date(2026, 6, 13), end=date(2026, 7, 9))
+        chtml = Path(closed["output"]).read_text(encoding="utf-8")
         check("a position closed inside the window still gets a row",
-              "Open option cash $320.00 \u2192 $0.00" in html, True)
+              "Open option cash $320.00 \u2192 $0.00" in chtml, True)
         check("the arrow is a character, not an escaped entity",
               "&amp;rarr;" in html, False)
 
@@ -1391,7 +1479,7 @@ def _group_12_window_page():
         check("--from alone runs to the last row on file",
               since["window"], ("2026-07-01", "2026-07-28"))
         check("--from alone reports the same income as the full month",
-              since["net_income"], 1459.25)
+              since["net_income"], 909.25)
         until = build_dashboard(input_dir=SAMPLE, output_dir=tmp,
                                 filename="until.html", end=date(2026, 6, 30))
         check("--to alone starts at the first row on file",
@@ -1432,8 +1520,13 @@ def _group_13_by_ticker():
     check("SPY is fully closed, so nothing is held", by["SPY"].shares, 0.0)
 
     check("a position never sold contributes nothing",
-          by["TSLA"].net_contribution, 0.0)
-    check("...but is still reported as held", by["TSLA"].shares, 100.0)
+          by["NVDA"].net_contribution, 0.0)
+    check("...but is still reported as held", by["NVDA"].shares, 20.0)
+    check("a losing trade contributes its loss", by["MSFT"].net_contribution, -400.0)
+    check("...and leaves nothing held", by["MSFT"].shares, 0.0)
+    check("the closed roll leg is a loss on its underlying",
+          by["TSLA"].realized_options, -150.0)
+    check("...while the shares under it are untouched", by["TSLA"].shares, 100.0)
     check("shares received in an exchange are held under the new ticker",
           by["LCID"].shares, 100.0)
     check("the surrendered ticker is gone from the rollup", "CCIV" in by, False)
@@ -1592,10 +1685,10 @@ def _group_14_controls():
         check("a window renders the out-of-window toggle",
               'id="f-outside"' in wpage, True)
         check("the heading says how many of how many",
-              "Transactions in window (10 of 22)" in wpage, True)
+              "Transactions in window (15 of 27)" in wpage, True)
         inside = len(re.findall(r'data-in-window="true"', wpage))
         outside = len(re.findall(r'data-in-window="false"', wpage))
-        check("in-window rows are marked", inside, 10)
+        check("in-window rows are marked", inside, 15)
         check("out-of-window rows are kept, not dropped", outside, 12)
         check("the june purchase behind july's gain is on the page",
               'data-ticker="AAPL" data-date="2026-06-03"' in wpage, True)

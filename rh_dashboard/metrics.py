@@ -37,7 +37,7 @@ never at what it is worth today. See the dashboard footer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
                     LOT_MATCHED_CATEGORIES, TRANSFER_CATEGORIES, Category,
@@ -79,6 +79,56 @@ class CategorySummary:
         """cash_total - income_total: for Equity/Options, the cash currently
         tied up in open positions. Zero for every other category."""
         return self.cash_total - self.income_total
+
+
+@dataclass
+class TradeStats:
+    """Closed trades in the reported period.
+
+    **A trade is one closing event.** A sale that closes half a position counts
+    once, on the day it settles the P&L; an option counts when it closes,
+    whether that is an early buy-to-close, a sell-to-close, or expiry. That is
+    already exactly what `positions.realized_events` contains, so this is a
+    reading of the engine rather than a second opinion about what a trade is.
+
+    Opening a position is not a trade here and never appears: buying stock
+    realizes nothing, and a sold-to-open contract realizes nothing until it is
+    closed or expires. A rollover therefore counts as one trade — the leg that
+    closed — while the new contract stays open and uncounted.
+    """
+    wins: list[float]
+    losses: list[float]
+    scratches: list[float]            # closed at exactly zero
+
+    @property
+    def count(self) -> int:
+        return len(self.wins) + len(self.losses) + len(self.scratches)
+
+    @property
+    def win_rate(self) -> float:
+        """Share of closed trades that made money, 0-100. Scratches count in
+        the denominator: a trade that closed flat still happened."""
+        return 100.0 * len(self.wins) / self.count if self.count else 0.0
+
+    @property
+    def avg_win(self) -> float:
+        return sum(self.wins) / len(self.wins) if self.wins else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        return sum(self.losses) / len(self.losses) if self.losses else 0.0
+
+    @property
+    def total(self) -> float:
+        return sum(self.wins) + sum(self.losses) + sum(self.scratches)
+
+    @property
+    def best(self) -> float:
+        return max(self.wins, default=0.0)
+
+    @property
+    def worst(self) -> float:
+        return min(self.losses, default=0.0)
 
 
 @dataclass
@@ -149,6 +199,8 @@ class Metrics:
     full_range: tuple[str, str] | None
     by_ticker: list[TickerSummary]
     unattributed: TickerSummary
+    trades: TradeStats
+    daily_realized: list[tuple[str, float]]   # one entry per day in the range
     txn_count: int
     date_range: tuple[str, str] | None
     fallback: FallbackSummary
@@ -245,6 +297,37 @@ def _by_ticker(classified: list[Classified], positions: PositionsResult
     return rows, unattributed
 
 
+def _trade_stats(positions: PositionsResult) -> TradeStats:
+    wins, losses, scratches = [], [], []
+    for e in positions.realized_events:
+        if e.amount > 0.005:
+            wins.append(e.amount)
+        elif e.amount < -0.005:
+            losses.append(e.amount)
+        else:
+            scratches.append(e.amount)
+    return TradeStats(wins=wins, losses=losses, scratches=scratches)
+
+
+def _daily_realized(positions: PositionsResult, start: date, end: date
+                    ) -> list[tuple[str, float]]:
+    """Realized P&L per calendar day, one entry per day in the range.
+
+    Days with no closing trade are present at 0.00 rather than absent. A bar
+    chart built from only the active days compresses a quiet fortnight into
+    nothing and makes two adjacent trades look consecutive — the empty days are
+    part of what the chart is saying.
+    """
+    by_day: dict[date, float] = {}
+    for e in positions.realized_events:
+        by_day[e.activity_date] = by_day.get(e.activity_date, 0.0) + e.amount
+    out, d = [], start
+    while d <= end:
+        out.append((d.isoformat(), by_day.get(d, 0.0)))
+        d += timedelta(days=1)
+    return out
+
+
 def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
     return Metrics(
         months=[],
@@ -258,6 +341,7 @@ def _empty(duplicates_removed: int, row_errors: list[str]) -> Metrics:
         opening_options_net_cash=0.0, window=None, full_range=None,
         by_ticker=[], unattributed=TickerSummary("", 0.0, 0.0, 0.0, 0.0,
                                                  0.0, 0.0, 0.0, None),
+        trades=TradeStats([], [], []), daily_realized=[],
         txn_count=0, date_range=None,
         fallback=FallbackSummary(0, {}), duplicates_removed=duplicates_removed,
         row_errors=row_errors)
@@ -373,6 +457,12 @@ def compute(classified: list[Classified], positions: PositionsResult,
     reconciliation_error = total_cash_movement - expected_cash
 
     by_ticker, unattributed = _by_ticker(classified, positions)
+    trades = _trade_stats(positions)
+    # The bar chart spans the range being *reported*, so an empty window still
+    # draws its own days rather than collapsing to nothing.
+    span_start = window.start if window else min(dates)
+    span_end = window.end if window else max(dates)
+    daily_realized = _daily_realized(positions, span_start, span_end)
 
     return Metrics(
         months=months, categories=categories, net_income=net_income,
@@ -391,6 +481,8 @@ def compute(classified: list[Classified], positions: PositionsResult,
         full_range=full_range,
         by_ticker=by_ticker,
         unattributed=unattributed,
+        trades=trades,
+        daily_realized=daily_realized,
         txn_count=len(classified),
         date_range=((window.start.isoformat(), window.end.isoformat()) if window
                     else (min(dates).isoformat(), max(dates).isoformat())

@@ -127,7 +127,22 @@ permanently 100%.
 
 ---
 
-## Decisions I need from you
+## Decisions taken
+
+1. **A trade is one closing event** — the sale or expiry that realizes P&L. An
+   option counts when it closes, whether by an early buy-to-close, a
+   sell-to-close, or expiry. A **rollover counts once**: the leg that closed
+   realizes, the further-dated leg it opened stays uncounted until it closes.
+   This is what `positions.realized_events` already contains.
+2. **"Avg gain in %" is dropped**, so `RealizedEvent` needs no `cost_basis`
+   after all and the engine is untouched. The fourth ring becomes **average
+   loss**, which pairs with average win and needs nothing new.
+3. **`sample_data` gained a losing trade and an option rollover** — MSFT bought
+   and sold down, and a TSLA put bought back at a loss on the same day a
+   further-dated put is sold. Five trades now close: three wins, two losses,
+   60% win rate, and the fixture ends holding an open short option.
+
+## Superseded
 
 1. **What counts as a trade?** I propose **each closing event** — a partial
    sale counts as one trade. The alternative is a full round trip, which reads
