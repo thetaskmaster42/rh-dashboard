@@ -90,11 +90,11 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 463 assertions across 14 groups
+uv run ./rh-dashboard selftest                       # 554 assertions across 15 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
-by name; it always runs all 14 groups. Group 9 binds a real socket on port 0 and
+by name; it always runs all 15 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
@@ -299,6 +299,18 @@ metrics asks `positions.py` for the realized figures.
    512x512 original; the docstring in `assets.py` carries the Pillow snippet
    that regenerates the 32x32 bytes, and Pillow is deliberately not a
    dependency of anything that runs.
+6b. **`periods.py`** pre-computes the `1m`/`3m`/`1y`/`at` views at build time
+   and `dashboard.py` embeds them as JSON, because **a period button cannot ask
+   anything to recompute** — the page has to work opened from a downloads
+   folder with no server behind it. Periods run back from the **last activity
+   date in the statements, never from today**: a statement export is historic,
+   and anchoring to today would show empty rings to anyone opening last
+   quarter's dashboard. A period wider than the data is clamped to it rather
+   than drawing empty months that read as a drawdown, and `_months_before`
+   clamps the day so a month back from the 31st lands on a real date.
+   The charts are drawn client-side via `svg.innerHTML`, **not**
+   `createElementNS`: the namespace URI is a literal scheme-and-slashes, and
+   the offline check cannot tell a namespace from a CDN, so it fails the build.
 7. **`pipeline.build_dashboard`** is the public API tying the above together;
    **`cli.py`** is the argparse wrapper; `rh-dashboard` (repo-relative
    executable) puts its own directory on `sys.path` and calls `cli.main`.

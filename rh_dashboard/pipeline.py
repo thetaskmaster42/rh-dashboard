@@ -22,6 +22,7 @@ from .dedupe import dedupe
 from .loader import LoadError, load_folder
 from .metrics import compute
 from .model import INCOME_CATEGORIES, TRANSFER_CATEGORIES, CostBasis, Window
+from .periods import compute_periods
 from .positions import compute_positions, compute_windowed
 
 
@@ -86,7 +87,8 @@ def build_dashboard(input_dir: str | Path = "input",
     # table can still show what falls outside the window, marked as such.
     html = build_page(metrics, positions, reported, load_result.files_read,
                       load_result.row_errors, interactive=interactive,
-                      cost_basis=cost_basis, all_rows=classified)
+                      cost_basis=cost_basis, all_rows=classified,
+                      periods=compute_periods(classified, cost_basis=cost_basis))
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

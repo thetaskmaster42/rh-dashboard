@@ -35,6 +35,7 @@ from .categorize import categorize, categorize_all
 from .dedupe import dedupe
 from .loader import LoadError, load_file, load_folder
 from .metrics import TradeStats, compute
+from .periods import _months_before, compute_periods
 from .model import Category, Classified, CostBasis, Transaction, Window
 from .pipeline import build_dashboard
 from .positions import compute_positions, compute_windowed, normalise_contract
@@ -44,7 +45,7 @@ SAMPLE = ROOT / "sample_data"
 
 FAILS: list[str] = []
 CHECKS = 0
-GROUPS = 14
+GROUPS = 15
 
 
 def _close(got, want, tol) -> bool:
@@ -1716,6 +1717,92 @@ def _group_14_controls():
         shutil.rmtree(tmp)
 
 
+def _group_15_periods():
+    """The pre-computed period views and the page that switches between them."""
+    group(15, "period views")
+    lr = load_folder(SAMPLE)
+    cls = categorize_all(dedupe(lr.transactions).kept)
+    views = {p.key: p for p in compute_periods(cls)}
+
+    check("four periods are offered", sorted(views), ["1m", "1y", "3m", "at"])
+    check("periods anchor on the last activity date, not today",
+          {p.end.isoformat() for p in views.values()}, {"2026-07-28"})
+
+    # 1m runs back one calendar month from the anchor, so it picks up July's
+    # four closes but not June's SPY sale on the 10th.
+    one = views["1m"]
+    check("1m starts a calendar month back", one.start.isoformat(), "2026-06-28")
+    check("1m closed four trades", one.trades.count, 4)
+    check("1m win rate", one.trades.win_rate, 50.00)
+    check("1m profit is realized trade P&L", one.profit, 910.00)
+    check("1m average win", one.trades.avg_win, 730.00)
+    check("1m average loss", one.trades.avg_loss, -275.00)
+    check("1m spans its own days", len(one.daily), 31)
+
+    # A period wider than the statements is clamped to them rather than drawing
+    # empty months that would read as a flat drawdown.
+    for key in ("3m", "1y", "at"):
+        check(f"{key} is clamped to the first row on file",
+              views[key].start.isoformat(), "2026-06-02")
+        check(f"{key} closed every trade", views[key].trades.count, 5)
+    check("all-time profit equals the lot-matched income",
+          views["at"].profit, 1010.00)
+
+    # Cumulative is the running sum of daily, so its last point is the profit.
+    cum = views["at"].cumulative
+    check("cumulative ends at the period's profit", cum[-1][1], views["at"].profit)
+    check("cumulative is as long as the daily series", len(cum), len(views["at"].daily))
+
+    # Month arithmetic has to land on a real day.
+    # Bad month arithmetic raises rather than returning a wrong date, so these
+    # catch the exception: an uncaught one would abort every later group.
+    def _back(d, months):
+        try:
+            return _months_before(d, months).isoformat()
+        except ValueError as e:
+            return f"raised: {e}"
+    check("a month back from the 31st lands on the last day of a short month",
+          _back(date(2026, 3, 31), 1), "2026-02-28")
+    check("a year back from a leap day lands in a real month",
+          _back(date(2028, 2, 29), 12), "2027-02-28")
+    check("a month back from the 31st of a 31-day month keeps the day",
+          _back(date(2026, 8, 31), 1), "2026-07-31")
+
+    # --- the page ---------------------------------------------------------
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        res = build_dashboard(input_dir=SAMPLE, output_dir=tmp)
+        page = Path(res["output"]).read_text(encoding="utf-8")
+        check("the performance section is rendered", 'id="performance"' in page, True)
+        check("four rings are drawn", page.count('class="ring"'), 4)
+        check("a button exists for every period",
+              sorted(re.findall(r'data-period="([a-z0-9]+)"', page)),
+              ["1m", "1y", "3m", "at"])
+        for ident in ("daily-chart", "cum-chart", "trades-dlg", "stats-dlg",
+                      "view-trades", "view-stats", "period-data"):
+            check(f"the page renders #{ident}", f'id="{ident}"' in page, True)
+
+        payload = json.loads(re.search(
+            r'id="period-data">(.*?)</script>', page, re.S).group(1))
+        check("every period is embedded", sorted(payload), ["1m", "1y", "3m", "at"])
+        check("the embedded 1m figures match the computed ones",
+              (payload["1m"]["profit"], payload["1m"]["count"],
+               payload["1m"]["win_rate"]), (910.00, 4, 50.00))
+        check("each period embeds the trades behind its own figures",
+              len(payload["at"]["events"]), 5)
+        check("the embedded events total the period's profit",
+              sum(e["amount"] for e in payload["at"]["events"]),
+              payload["at"]["profit"])
+        check("the page names the anchor it counted back from",
+              "2026-07-28" in page, True)
+
+        # The whole reason periods are precomputed rather than fetched.
+        check("the period view adds no network reference",
+              bool(re.search(r"https?://", page)), False)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def run_selftest() -> bool:
     _group_1_parsing()
     _group_2_headers()
@@ -1731,6 +1818,7 @@ def run_selftest() -> bool:
     _group_12_window_page()
     _group_13_by_ticker()
     _group_14_controls()
+    _group_15_periods()
 
     print()
     if FAILS:
