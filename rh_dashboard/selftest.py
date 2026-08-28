@@ -1778,9 +1778,21 @@ def _group_15_periods():
         check("a button exists for every period",
               sorted(re.findall(r'data-period="([a-z0-9]+)"', page)),
               ["1m", "1y", "3m", "at"])
-        for ident in ("daily-chart", "cum-chart", "trades-dlg", "stats-dlg",
+        for ident in ("perf-chart", "trades-dlg", "stats-dlg", "journal-dlg",
                       "view-trades", "view-stats", "period-data"):
             check(f"the page renders #{ident}", f'id="{ident}"' in page, True)
+
+        # One wide chart with a toggle, not two half-width ones.
+        check("the chart area is a single wide chart",
+              page.count('id="perf-chart"'), 1)
+        check("both chart views are offered",
+              sorted(re.findall(r'data-chart-view="(\w+)"', page)), ["cum", "daily"])
+
+        # The journal entries have to do something, or they are decoration.
+        check("every journal entry is present",
+              sorted(re.findall(r'data-journal="(\w+)"', page)),
+              ["calendar", "daily", "monthly"])
+        check("the journal card is labelled", "Trading Journal" in page, True)
 
         payload = json.loads(re.search(
             r'id="period-data">(.*?)</script>', page, re.S).group(1))

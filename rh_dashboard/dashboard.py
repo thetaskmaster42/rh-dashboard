@@ -211,43 +211,62 @@ td.muted { color: var(--text-secondary); opacity: .55; }
 .legend-chip { cursor: default; }
 
 /* ---- performance view -------------------------------------------------- */
-.perf { padding: 26px 26px 20px; }
-.perf-head { display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 20px; flex-wrap: wrap; margin-bottom: 22px; }
-.perf-title h2 { margin: 0; font-size: 34px; letter-spacing: -0.02em; line-height: 1.05; }
-.perf-range { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
-.period-bar { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px;
+.perf-wrap { display: grid; grid-template-columns: 1fr; gap: 18px; margin: 24px 0; }
+@media (min-width: 1040px) { .perf-wrap { grid-template-columns: 1fr 258px; } }
+.perf { padding: 26px; }
+.perf-head { display: flex; align-items: center; gap: 26px; flex-wrap: wrap;
+  margin-bottom: 24px; }
+.perf-title { min-width: 118px; }
+.perf-title h2 { margin: 0; font-size: 38px; letter-spacing: -0.025em; line-height: 1; }
+.perf-range { margin: 6px 0 0; font-size: 11.5px; color: var(--text-secondary); }
+.rings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px; flex: 1 1 420px; }
+@media (max-width: 620px) { .rings { grid-template-columns: repeat(2, 1fr); } }
+
+.perf-side { display: flex; flex-direction: column; gap: 14px; }
+.period-bar { display: flex; gap: 2px; padding: 3px; border-radius: 11px;
   background: var(--surface-2); border: 1px solid var(--border); }
-.period-btn { font: inherit; font-size: 12.5px; padding: 6px 15px; border: 0;
-  border-radius: 7px; background: transparent; color: var(--text-secondary);
+.period-btn { flex: 1; font: inherit; font-size: 12.5px; padding: 7px 8px; border: 0;
+  border-radius: 8px; background: transparent; color: var(--text-secondary);
   cursor: pointer; transition: background .15s, color .15s; }
 .period-btn:hover { color: var(--text-primary); }
 .period-btn.is-active { background: var(--surface-1); color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,.28); }
+  box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.journal { padding: 20px 18px; }
+.journal h3 { margin: 0 0 14px; font-size: 17px; letter-spacing: -0.01em; }
+.journal-item { display: flex; align-items: center; gap: 10px; width: 100%;
+  font: inherit; font-size: 13px; text-align: left; padding: 9px 8px; border: 0;
+  border-radius: 8px; background: transparent; color: var(--series-1);
+  cursor: pointer; transition: background .15s; }
+.journal-item:hover { background: var(--surface-2); }
+.jicon { font-size: 13px; opacity: .75; }
 
-.rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 18px; margin-bottom: 26px; }
 .ring { position: relative; text-align: center; }
-.ring svg { width: 100%; max-width: 132px; height: auto; display: block; margin: 0 auto; }
+.ring svg { width: 100%; max-width: 116px; height: auto; display: block; margin: 0 auto; }
 .ring-track { fill: none; stroke: var(--surface-2); stroke-width: 11; }
 .ring-arc { fill: none; stroke-width: 11; stroke-linecap: round;
   transition: stroke-dasharray .35s ease; }
 .ring-arc.pos { stroke: var(--gain); }
 .ring-arc.neg { stroke: var(--loss); }
 .ring-value { position: absolute; left: 0; right: 0; top: 50%;
-  transform: translateY(-72%); font-size: 20px; font-weight: 600;
+  transform: translateY(-124%); font-size: 18px; font-weight: 600;
   letter-spacing: -0.02em; pointer-events: none; }
-.ring-value .unit { font-size: 11px; font-weight: 500; color: var(--text-secondary); }
+.ring-value .unit { font-size: 10.5px; font-weight: 500; color: var(--text-secondary); }
 .ring-label { margin-top: 8px; font-size: 11.5px; color: var(--text-secondary); }
 
-.perf-charts { display: grid; grid-template-columns: 1fr; gap: 18px; }
-@media (min-width: 900px) { .perf-charts { grid-template-columns: 1.4fr 1fr; } }
-.perf-chart { margin: 0; padding: 14px 14px 10px; border-radius: 12px;
+.perf-chart { margin: 0; padding: 14px 16px 8px; border-radius: 12px;
   background: var(--surface-2); border: 1px solid var(--border); }
-.perf-chart figcaption { font-size: 11.5px; color: var(--text-secondary);
-  margin-bottom: 8px; }
-.perf-chart svg { width: 100%; height: 190px; display: block; }
-.axis-zero { stroke: var(--border); stroke-width: 1; }
+.perf-chart figcaption { display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; font-size: 11.5px;
+  color: var(--text-secondary); margin-bottom: 10px; }
+.chart-toggle { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px;
+  background: var(--page); border: 1px solid var(--border); }
+.chart-btn { font: inherit; font-size: 11.5px; padding: 4px 11px; border: 0;
+  border-radius: 6px; background: transparent; color: var(--text-secondary);
+  cursor: pointer; }
+.chart-btn.is-active { background: var(--surface-1); color: var(--text-primary); }
+.perf-chart svg { width: 100%; height: 240px; display: block; }
+.axis-zero { stroke: var(--baseline); stroke-width: 1; }
 .bar-pos { fill: var(--gain); }
 .bar-neg { fill: var(--loss); }
 .cum-line { fill: none; stroke-width: 2.5; stroke-linejoin: round;
@@ -255,16 +274,33 @@ td.muted { color: var(--text-secondary); opacity: .55; }
 .cum-line.pos { stroke: var(--gain); }
 .cum-line.neg { stroke: var(--loss); }
 .perf-note { font-size: 11.5px; color: var(--text-secondary); margin: 18px 0 0;
-  max-width: 76ch; }
+  max-width: 78ch; }
 .perf-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
 .ghost-btn { font: inherit; font-size: 12.5px; padding: 7px 16px; border-radius: 999px;
   border: 1px solid var(--border); background: transparent;
   color: var(--text-primary); cursor: pointer; transition: background .15s; }
 .ghost-btn:hover { background: var(--surface-2); }
-dialog#trades-dlg, dialog#stats-dlg { width: min(760px, 92vw); max-height: 82vh;
-  border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1);
-  color: var(--text-primary); padding: 20px; }
-dialog#trades-dlg::backdrop, dialog#stats-dlg::backdrop { background: rgba(0,0,0,.45); }
+dialog#trades-dlg, dialog#stats-dlg, dialog#journal-dlg {
+  width: min(780px, 92vw); max-height: 82vh; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--surface-1); color: var(--text-primary);
+  padding: 20px; }
+dialog#trades-dlg::backdrop, dialog#stats-dlg::backdrop,
+dialog#journal-dlg::backdrop { background: rgba(0,0,0,.45); }
+
+/* ---- calendar ---------------------------------------------------------- */
+.cal-month { margin-bottom: 20px; }
+.cal-month h4 { margin: 0 0 8px; font-size: 13px; }
+.cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow span { font-size: 10px; color: var(--text-muted); text-align: center; }
+.cal-cell { position: relative; aspect-ratio: 1; border-radius: 5px;
+  background: var(--surface-2); display: flex; align-items: center;
+  justify-content: center; }
+.cal-cell em { font-style: normal; font-size: 10.5px; color: var(--text-secondary); }
+.cal-cell.is-blank { background: transparent; }
+.cal-cell.is-out { opacity: .35; }
+.cal-cell.is-pos { background: var(--gain); }
+.cal-cell.is-neg { background: var(--loss); }
+.cal-cell.is-pos em, .cal-cell.is-neg em { color: #08150f; font-weight: 600; }
 td.pos { color: var(--gain); }
 td.neg { color: var(--loss); }
 dialog#drill { width: min(860px, 92vw); max-height: 82vh; border: 1px solid var(--border);
@@ -487,9 +523,9 @@ JS = """
   }
 
   function drawDaily(series) {
-    var svg = document.getElementById('daily-chart');
+    var svg = document.getElementById('perf-chart');
     if (!svg) { return; }
-    var W = 900, H = 220, PAD = 14;
+    var W = 900, H = 260, PAD = 16;
     var sc = scale(series.map(function (d) { return d[1]; }), H, PAD);
     var zero = sc.y(0);
     var slot = W / Math.max(series.length, 1);
@@ -511,9 +547,9 @@ JS = """
   }
 
   function drawCumulative(series) {
-    var svg = document.getElementById('cum-chart');
+    var svg = document.getElementById('perf-chart');
     if (!svg) { return; }
-    var W = 900, H = 220, PAD = 14;
+    var W = 900, H = 260, PAD = 16;
     var sc = scale(series.map(function (d) { return d[1]; }), H, PAD);
     var zero = sc.y(0);
     var step = series.length > 1 ? W / (series.length - 1) : 0;
@@ -548,15 +584,143 @@ JS = """
       arc.setAttribute('class', 'ring-arc ' + spec[i][2]);
       ringArc(arc, spec[i][1]);
     });
-    drawDaily(p.daily);
-    drawCumulative(p.cumulative);
+    drawChart();
     document.querySelectorAll('.period-btn').forEach(function (b) {
       b.classList.toggle('is-active', b.getAttribute('data-period') === key);
     });
   }
 
+  var chartView = 'cum';
+  function drawChart() {
+    var p = periodData[activePeriod];
+    if (!p) { return; }
+    var cap = document.getElementById('chart-caption');
+    if (chartView === 'daily') {
+      drawDaily(p.daily);
+      if (cap) { cap.textContent = 'Realized P&L per day'; }
+    } else {
+      drawCumulative(p.cumulative);
+      if (cap) { cap.textContent = 'Cumulative realized P&L'; }
+    }
+    document.querySelectorAll('.chart-btn').forEach(function (b) {
+      b.classList.toggle('is-active', b.getAttribute('data-chart-view') === chartView);
+    });
+  }
+  document.querySelectorAll('.chart-btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      chartView = b.getAttribute('data-chart-view');
+      drawChart();
+    });
+  });
+
   document.querySelectorAll('.period-btn').forEach(function (b) {
     b.addEventListener('click', function () { setPeriod(b.getAttribute('data-period')); });
+  });
+
+  // ---- trading journal --------------------------------------------------
+  // All three read the period already on screen, so the journal can never
+  // describe a different range from the rings above it.
+  function monthLabel(iso) {
+    var names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var parts = iso.split('-');
+    return names[parseInt(parts[1], 10) - 1] + ' ' + parts[0];
+  }
+
+  function journalDaily(p) {
+    var run = 0, rows = '';
+    p.daily.forEach(function (d) {
+      run += d[1];
+      if (Math.abs(d[1]) < 0.005) { return; }
+      rows += '<tr><td>' + d[0] + '</td><td class="num ' +
+        (d[1] >= 0 ? 'pos' : 'neg') + '">' + fmtMoney(d[1]) +
+        '</td><td class="num">' + fmtMoney(run) + '</td></tr>';
+    });
+    if (!rows) { rows = '<tr><td colspan="3">No trades closed in this period.</td></tr>'; }
+    return ['Daily Journal', 'Only days on which something actually closed. ' +
+      'A day you held through is not a day you traded.',
+      '<table class="data"><thead><tr><th>Date</th>' +
+      '<th class="num">Realized</th><th class="num">Running</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>'];
+  }
+
+  function journalMonthly(p) {
+    var order = [], by = {};
+    p.daily.forEach(function (d) {
+      var k = d[0].slice(0, 7);
+      if (!(k in by)) { by[k] = { pnl: 0, days: 0 }; order.push(k); }
+      by[k].pnl += d[1];
+      if (Math.abs(d[1]) > 0.005) { by[k].days += 1; }
+    });
+    var run = 0, rows = '';
+    order.forEach(function (k) {
+      run += by[k].pnl;
+      rows += '<tr><td>' + monthLabel(k + '-01') + '</td><td class="num">' +
+        by[k].days + '</td><td class="num ' + (by[k].pnl >= 0 ? 'pos' : 'neg') +
+        '">' + fmtMoney(by[k].pnl) + '</td><td class="num">' + fmtMoney(run) +
+        '</td></tr>';
+    });
+    return ['Monthly Journal', 'Each month in the period, and how many days in it ' +
+      'closed a trade.',
+      '<table class="data"><thead><tr><th>Month</th><th class="num">Active days</th>' +
+      '<th class="num">Realized</th><th class="num">Running</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>'];
+  }
+
+  function journalCalendar(p) {
+    var by = {}, months = [], seen = {};
+    p.daily.forEach(function (d) {
+      by[d[0]] = d[1];
+      var k = d[0].slice(0, 7);
+      if (!seen[k]) { seen[k] = 1; months.push(k); }
+    });
+    // Scale intensity to the biggest absolute day so one huge trade does not
+    // wash every other day out to the same shade.
+    var peak = 0;
+    p.daily.forEach(function (d) { peak = Math.max(peak, Math.abs(d[1])); });
+    var html = '';
+    months.forEach(function (k) {
+      var y = parseInt(k.slice(0, 4), 10), mo = parseInt(k.slice(5, 7), 10);
+      var first = new Date(Date.UTC(y, mo - 1, 1));
+      var lead = first.getUTCDay();
+      var days = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+      var cells = '';
+      for (var i = 0; i < lead; i += 1) { cells += '<span class="cal-cell is-blank"></span>'; }
+      for (var d = 1; d <= days; d += 1) {
+        var iso = k + '-' + (d < 10 ? '0' + d : d);
+        var v = by[iso];
+        var cls = 'cal-cell', style = '';
+        if (v === undefined) {
+          cls += ' is-out';
+        } else if (Math.abs(v) > 0.005) {
+          cls += v > 0 ? ' is-pos' : ' is-neg';
+          style = ' style="opacity:' + (0.35 + 0.65 * Math.abs(v) / (peak || 1)).toFixed(2) + '"';
+        }
+        cells += '<span class="' + cls + '"' + style + ' title="' + iso +
+          (v === undefined ? ' (outside the period)' : ': ' + fmtMoney(v || 0)) +
+          '"><em>' + d + '</em></span>';
+      }
+      html += '<div class="cal-month"><h4>' + monthLabel(k + '-01') + '</h4>' +
+        '<div class="cal-dow"><span>S</span><span>M</span><span>T</span><span>W</span>' +
+        '<span>T</span><span>F</span><span>S</span></div>' +
+        '<div class="cal-grid">' + cells + '</div></div>';
+    });
+    return ['Calendar', 'Each day shaded by what closed on it, strongest on the ' +
+      'biggest day of the period. Blank days are outside it.', html];
+  }
+
+  document.querySelectorAll('.journal-item').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var p = periodData[activePeriod];
+      var dlg = document.getElementById('journal-dlg');
+      if (!p || !dlg || !dlg.showModal) { return; }
+      var kind = b.getAttribute('data-journal');
+      var parts = kind === 'monthly' ? journalMonthly(p)
+        : kind === 'calendar' ? journalCalendar(p) : journalDaily(p);
+      document.getElementById('journal-title').textContent = parts[0] + ' — ' + p.title;
+      document.getElementById('journal-sub').textContent = parts[1];
+      document.getElementById('journal-body').innerHTML = parts[2];
+      dlg.showModal();
+    });
   });
 
   // ---- view trades / view statistics ------------------------------------
@@ -1135,7 +1299,12 @@ def _compact(v: float) -> str:
 
 
 def _performance_section(periods: list, anchor: str) -> str:
-    """Period selector, the four rings, and the daily/cumulative charts.
+    """Period selector, the four rings, one wide chart, and the journal card.
+
+    A single wide chart rather than two side by side: the daily bars and the
+    cumulative line answer the same question at different resolutions, and
+    showing both at half width makes each too small to read. They share the
+    space and a toggle instead.
 
     Every period is embedded; the buttons switch between answers computed at
     build time, because a downloaded file has nothing to ask for a new one.
@@ -1160,36 +1329,51 @@ def _performance_section(periods: list, anchor: str) -> str:
               (abs(t.avg_loss) / denom) if denom else 0.0, "neg"),
     ])
     return f"""
-  <section class="card perf" id="performance">
-    <div class="perf-head">
-      <div class="perf-title">
-        <h2 id="perf-title">{esc(current.title)}</h2>
-        <p class="perf-range" id="perf-range">{esc(current.start.isoformat())} to
-          {esc(current.end.isoformat())}</p>
+  <section class="perf-wrap" id="performance">
+    <div class="card perf">
+      <div class="perf-head">
+        <div class="perf-title">
+          <h2 id="perf-title">{esc(current.title)}</h2>
+          <p class="perf-range" id="perf-range">{esc(current.start.isoformat())} to
+            {esc(current.end.isoformat())}</p>
+        </div>
+        <div class="rings" id="rings">{rings}</div>
       </div>
+      <figure class="perf-chart">
+        <figcaption>
+          <span id="chart-caption">Cumulative realized P&amp;L</span>
+          <span class="chart-toggle" role="group" aria-label="Chart view">
+            <button class="chart-btn is-active" data-chart-view="cum"
+                    type="button">Cumulative</button>
+            <button class="chart-btn" data-chart-view="daily"
+                    type="button">Daily</button>
+          </span>
+        </figcaption>
+        <svg id="perf-chart" viewBox="0 0 900 260" preserveAspectRatio="none"
+             role="img" aria-label="Realized profit and loss"></svg>
+      </figure>
+      <p class="perf-note">Periods run back from <strong>{esc(anchor)}</strong>, the
+        last activity date in these statements &mdash; not from today, so this page
+        reads the same whenever it is opened. Figures here are realized trading P&amp;L
+        only; dividends, fees and subscriptions are in the summary below.</p>
+      <div class="perf-actions">
+        <button class="ghost-btn" id="view-trades" type="button">View trades</button>
+        <button class="ghost-btn" id="view-stats" type="button">View statistics</button>
+      </div>
+    </div>
+
+    <aside class="perf-side">
       <div class="period-bar" role="group" aria-label="Reporting period">{buttons}</div>
-    </div>
-    <div class="rings" id="rings">{rings}</div>
-    <div class="perf-charts">
-      <figure class="perf-chart">
-        <figcaption>Realized P&amp;L per day</figcaption>
-        <svg id="daily-chart" viewBox="0 0 900 220" preserveAspectRatio="none"
-             role="img" aria-label="Realized profit and loss per day"></svg>
-      </figure>
-      <figure class="perf-chart">
-        <figcaption>Cumulative</figcaption>
-        <svg id="cum-chart" viewBox="0 0 900 220" preserveAspectRatio="none"
-             role="img" aria-label="Cumulative realized profit and loss"></svg>
-      </figure>
-    </div>
-    <p class="perf-note">Periods run back from <strong>{esc(anchor)}</strong>, the last
-      activity date in these statements &mdash; not from today, so this page reads the
-      same whenever it is opened. Figures here are realized trading P&amp;L only;
-      dividends, fees and subscriptions are in the summary below.</p>
-    <div class="perf-actions">
-      <button class="ghost-btn" id="view-trades" type="button">View trades</button>
-      <button class="ghost-btn" id="view-stats" type="button">View statistics</button>
-    </div>
+      <div class="card journal">
+        <h3>Trading Journal</h3>
+        <button class="journal-item" data-journal="daily" type="button">
+          <span class="jicon" aria-hidden="true">&#9711;</span>Daily Journal</button>
+        <button class="journal-item" data-journal="monthly" type="button">
+          <span class="jicon" aria-hidden="true">&#9776;</span>Monthly Journal</button>
+        <button class="journal-item" data-journal="calendar" type="button">
+          <span class="jicon" aria-hidden="true">&#9639;</span>Calendar</button>
+      </div>
+    </aside>
   </section>"""
 
 
@@ -1208,6 +1392,13 @@ def _period_dialogs() -> str:
         <th>Date</th><th>Position</th><th>Kind</th>
         <th class="num">Qty</th><th class="num">Realized</th>
       </tr></thead><tbody id="trades-body"></tbody></table></div>
+    </dialog>
+    <dialog id="journal-dlg">
+      <form method="dialog" class="drill-head">
+        <h3 id="journal-title"></h3><button value="close">Close</button>
+      </form>
+      <p class="sub-head" id="journal-sub"></p>
+      <div id="journal-body" class="table-scroll"></div>
     </dialog>
     <dialog id="stats-dlg">
       <form method="dialog" class="drill-head">

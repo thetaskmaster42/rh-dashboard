@@ -90,7 +90,7 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 554 assertions across 15 groups
+uv run ./rh-dashboard selftest                       # 562 assertions across 15 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
@@ -311,6 +311,11 @@ metrics asks `positions.py` for the realized figures.
    The charts are drawn client-side via `svg.innerHTML`, **not**
    `createElementNS`: the namespace URI is a literal scheme-and-slashes, and
    the offline check cannot tell a namespace from a CDN, so it fails the build.
+   The performance card is **one wide chart with a Cumulative/Daily toggle**,
+   not two half-width ones — they answer the same question at two resolutions
+   and neither is legible at half width. The Trading Journal card's three
+   entries all read the period already on screen, so a journal can never
+   describe a different range from the rings above it.
 7. **`pipeline.build_dashboard`** is the public API tying the above together;
    **`cli.py`** is the argparse wrapper; `rh-dashboard` (repo-relative
    executable) puts its own directory on `sys.path` and calls `cli.main`.
