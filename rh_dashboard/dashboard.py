@@ -91,6 +91,11 @@ CSS = """
   --series-8: #e34948;
   --good-text: #006300;
   --bad-text: #d03b3b;
+  /* Direction only. These carry the whole performance view's meaning, so they
+     are their own tokens rather than the text colours, which have to stay
+     readable at 12px and cannot be tuned for a 11px-wide ring stroke. */
+  --gain: #00b464;
+  --loss: #e5545c;
   --warn-bg: #fff4e0;
   --warn-border: #fab219;
 }
@@ -116,6 +121,8 @@ CSS = """
     --series-8: #e66767;
     --good-text: #0ca30c;
     --bad-text: #d03b3b;
+    --gain: #00c46e;
+    --loss: #ff6b72;
     --warn-bg: #2a2210;
     --warn-border: #fab219;
   }
@@ -202,6 +209,107 @@ td.muted { color: var(--text-secondary); opacity: .55; }
 .control input[type=checkbox] { accent-color: var(--series-1); }
 .filter-count { font-size: 11.5px; color: var(--text-secondary); }
 .legend-chip { cursor: default; }
+
+/* ---- performance view -------------------------------------------------- */
+.perf-wrap { display: grid; grid-template-columns: 1fr; gap: 18px; margin: 24px 0; }
+@media (min-width: 1040px) { .perf-wrap { grid-template-columns: 1fr 258px; } }
+.perf { padding: 26px; }
+.perf-head { display: flex; align-items: center; gap: 26px; flex-wrap: wrap;
+  margin-bottom: 24px; }
+.perf-title { min-width: 118px; }
+.perf-title h2 { margin: 0; font-size: 38px; letter-spacing: -0.025em; line-height: 1; }
+.perf-range { margin: 6px 0 0; font-size: 11.5px; color: var(--text-secondary); }
+.rings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px; flex: 1 1 420px; }
+@media (max-width: 620px) { .rings { grid-template-columns: repeat(2, 1fr); } }
+
+.perf-side { display: flex; flex-direction: column; gap: 14px; }
+.period-bar { display: flex; gap: 2px; padding: 3px; border-radius: 11px;
+  background: var(--surface-2); border: 1px solid var(--border); }
+.period-btn { flex: 1; font: inherit; font-size: 12.5px; padding: 7px 8px; border: 0;
+  border-radius: 8px; background: transparent; color: var(--text-secondary);
+  cursor: pointer; transition: background .15s, color .15s; }
+.period-btn:hover { color: var(--text-primary); }
+.period-btn.is-active { background: var(--surface-1); color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.journal { padding: 20px 18px; }
+.journal h3 { margin: 0 0 14px; font-size: 17px; letter-spacing: -0.01em; }
+.journal-item { display: flex; align-items: center; gap: 10px; width: 100%;
+  font: inherit; font-size: 13px; text-align: left; padding: 9px 8px; border: 0;
+  border-radius: 8px; background: transparent; color: var(--series-1);
+  cursor: pointer; transition: background .15s; }
+.journal-item:hover { background: var(--surface-2); }
+.jicon { font-size: 13px; opacity: .75; }
+
+.ring { position: relative; text-align: center; }
+.ring svg { width: 100%; max-width: 116px; height: auto; display: block; margin: 0 auto; }
+.ring-track { fill: none; stroke: var(--surface-2); stroke-width: 11; }
+.ring-arc { fill: none; stroke-width: 11; stroke-linecap: round;
+  transition: stroke-dasharray .35s ease; }
+.ring-arc.pos { stroke: var(--gain); }
+.ring-arc.neg { stroke: var(--loss); }
+.ring-value { position: absolute; left: 0; right: 0; top: 50%;
+  transform: translateY(-124%); font-size: 18px; font-weight: 600;
+  letter-spacing: -0.02em; pointer-events: none; }
+.ring-value .unit { font-size: 10.5px; font-weight: 500; color: var(--text-secondary); }
+.ring-label { margin-top: 8px; font-size: 11.5px; color: var(--text-secondary); }
+
+.perf-chart { margin: 0; padding: 14px 16px 8px; border-radius: 12px;
+  background: var(--surface-2); border: 1px solid var(--border); }
+.perf-chart figcaption { display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; font-size: 11.5px;
+  color: var(--text-secondary); margin-bottom: 10px; }
+.chart-toggle { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px;
+  background: var(--page); border: 1px solid var(--border); }
+.chart-btn { font: inherit; font-size: 11.5px; padding: 4px 11px; border: 0;
+  border-radius: 6px; background: transparent; color: var(--text-secondary);
+  cursor: pointer; }
+.chart-btn.is-active { background: var(--surface-1); color: var(--text-primary); }
+.perf-chart svg { width: 100%; height: auto; display: block; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.axis-zero { stroke: var(--baseline); stroke-width: 1.4; }
+.axis-label { fill: var(--text-muted); font-size: 11px; }
+.axis-label.y { text-anchor: end; dominant-baseline: middle; }
+.axis-label.x { text-anchor: middle; }
+.cum-dot { stroke: none; }
+.cum-dot.pos { fill: var(--gain); }
+.cum-dot.neg { fill: var(--loss); }
+.bar-pos { fill: var(--gain); }
+.bar-neg { fill: var(--loss); }
+.cum-line { fill: none; stroke-width: 2.5; stroke-linejoin: round;
+  stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.cum-line.pos { stroke: var(--gain); }
+.cum-line.neg { stroke: var(--loss); }
+.perf-note { font-size: 11.5px; color: var(--text-secondary); margin: 18px 0 0;
+  max-width: 78ch; }
+.perf-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+.ghost-btn { font: inherit; font-size: 12.5px; padding: 7px 16px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-primary); cursor: pointer; transition: background .15s; }
+.ghost-btn:hover { background: var(--surface-2); }
+dialog#trades-dlg, dialog#stats-dlg, dialog#journal-dlg {
+  width: min(780px, 92vw); max-height: 82vh; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--surface-1); color: var(--text-primary);
+  padding: 20px; }
+dialog#trades-dlg::backdrop, dialog#stats-dlg::backdrop,
+dialog#journal-dlg::backdrop { background: rgba(0,0,0,.45); }
+
+/* ---- calendar ---------------------------------------------------------- */
+.cal-month { margin-bottom: 20px; }
+.cal-month h4 { margin: 0 0 8px; font-size: 13px; }
+.cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-dow span { font-size: 10px; color: var(--text-muted); text-align: center; }
+.cal-cell { position: relative; aspect-ratio: 1; border-radius: 5px;
+  background: var(--surface-2); display: flex; align-items: center;
+  justify-content: center; }
+.cal-cell em { font-style: normal; font-size: 10.5px; color: var(--text-secondary); }
+.cal-cell.is-blank { background: transparent; }
+.cal-cell.is-out { opacity: .35; }
+.cal-cell.is-pos { background: var(--gain); }
+.cal-cell.is-neg { background: var(--loss); }
+.cal-cell.is-pos em, .cal-cell.is-neg em { color: #08150f; font-weight: 600; }
+td.pos { color: var(--gain); }
+td.neg { color: var(--loss); }
 dialog#drill { width: min(860px, 92vw); max-height: 82vh; border: 1px solid var(--border);
   border-radius: 12px; background: var(--surface-1); color: var(--text-primary);
   padding: 20px; }
@@ -378,6 +486,354 @@ JS = """
         ? '' : '.35';
     });
   }
+
+  // ---- period views ----------------------------------------------------
+  // Every period was computed at build time and embedded, so switching is a
+  // lookup rather than a request. That is what lets this work from a file://
+  // URL with nothing behind it.
+  var periodData = {};
+  var pdEl = document.getElementById('period-data');
+  if (pdEl) { try { periodData = JSON.parse(pdEl.textContent); } catch (e) { } }
+  var activePeriod = null;
+
+  var RING_C = 2 * Math.PI * 46;
+  function ringArc(el, frac) {
+    if (!(frac >= 0)) { frac = 0; }
+    frac = Math.min(1, frac);
+    el.setAttribute('stroke-dasharray', (frac * RING_C).toFixed(2) + ' ' + RING_C.toFixed(2));
+  }
+  function compact(v) {
+    var sign = v < 0 ? '-' : '', a = Math.abs(v);
+    if (a >= 1000) {
+      return sign + '$' + (a / 1000).toFixed(2) + '<span class="unit">k</span>';
+    }
+    return sign + '$' + a.toFixed(2);
+  }
+
+  // Markup strings assigned to svg.innerHTML, which the parser handles in the
+  // SVG namespace. createElementNS would need the SVG namespace URI spelled
+  // out, and a literal scheme-and-slashes anywhere in this file fails the
+  // build — the page's whole promise is that it references nothing off itself,
+  // and the check that enforces it cannot tell a namespace from a CDN.
+  function esc(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ---- chart geometry ---------------------------------------------------
+  // Margins, because the axes need somewhere to live. preserveAspectRatio is
+  // NOT "none" on these: that stretches the viewBox to fill the width and
+  // takes every text node with it, so the labels would render squashed.
+  var CH = { W: 900, H: 300, L: 66, R: 14, T: 14, B: 34 };
+  CH.x0 = CH.L; CH.x1 = CH.W - CH.R; CH.y0 = CH.T; CH.y1 = CH.H - CH.B;
+
+  // Round numbers a person would actually choose, about `target` of them.
+  // A fixed axis cannot work here: the same page has to read sensibly whether
+  // the biggest day is $200 or $200,000.
+  function niceTicks(lo, hi, target) {
+    if (hi === lo) { hi = lo + 1; }
+    var raw = (hi - lo) / target;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var n = raw / mag;
+    var step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+    var out = [], v = Math.floor(lo / step) * step;
+    var last = Math.ceil(hi / step) * step;
+    for (; v <= last + step * 1e-9; v += step) { out.push(Math.round(v * 1e6) / 1e6); }
+    return out;
+  }
+
+  function fmtTick(v) {
+    var a = Math.abs(v);
+    if (a >= 1000) { return (v < 0 ? '-' : '') + (a / 1000) + 'k'; }
+    return String(v);
+  }
+
+  function fmtDay(iso) {
+    var names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var p = iso.split('-');
+    return names[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10);
+  }
+
+  // Grid, y labels and a readable number of dated x labels. Returns the value
+  // scale so the caller can place its own marks against the same axis.
+  function drawAxes(svg, values, series) {
+    var ticks = niceTicks(Math.min.apply(null, values.concat([0])),
+                          Math.max.apply(null, values.concat([0])), 5);
+    var lo = ticks[0], hi = ticks[ticks.length - 1];
+    function y(v) { return CH.y1 - (v - lo) / (hi - lo) * (CH.y1 - CH.y0); }
+    var out = '';
+    ticks.forEach(function (t) {
+      var yy = y(t).toFixed(2);
+      out += '<line x1="' + CH.x0 + '" x2="' + CH.x1 + '" y1="' + yy + '" y2="' + yy +
+        '" class="' + (t === 0 ? 'axis-zero' : 'grid-line') + '"></line>' +
+        '<text x="' + (CH.x0 - 9) + '" y="' + yy + '" class="axis-label y">' +
+        esc(fmtTick(t)) + '</text>';
+    });
+    // Roughly one label per 110px of plot width, so a year does not overlap.
+    var maxLabels = Math.max(2, Math.floor((CH.x1 - CH.x0) / 110));
+    var stride = Math.max(1, Math.ceil(series.length / maxLabels));
+    var slot = (CH.x1 - CH.x0) / Math.max(series.length, 1);
+    series.forEach(function (d, i) {
+      if (i % stride && i !== series.length - 1) { return; }
+      var xx = CH.x0 + i * slot + slot / 2;
+      if (xx > CH.x1 - 4) { xx = CH.x1 - 4; }
+      out += '<text x="' + xx.toFixed(2) + '" y="' + (CH.y1 + 20) +
+        '" class="axis-label x">' + esc(fmtDay(d[0])) + '</text>';
+    });
+    svg.innerHTML = out;
+    return { y: y, slot: slot };
+  }
+
+  function drawDaily(series) {
+    var svg = document.getElementById('perf-chart');
+    if (!svg) { return; }
+    var ax = drawAxes(svg, series.map(function (d) { return d[1]; }), series);
+    var zero = ax.y(0);
+    var bw = Math.max(1.5, Math.min(26, ax.slot * 0.62));
+    var out = svg.innerHTML;
+    series.forEach(function (d, i) {
+      var v = d[1];
+      if (Math.abs(v) < 0.005) { return; }
+      var yv = ax.y(v);
+      var top = Math.min(yv, zero), hgt = Math.max(1.5, Math.abs(yv - zero));
+      out += '<rect x="' + (CH.x0 + i * ax.slot + (ax.slot - bw) / 2).toFixed(2) +
+        '" y="' + top.toFixed(2) + '" width="' + bw.toFixed(2) +
+        '" height="' + hgt.toFixed(2) + '" rx="2" class="' +
+        (v >= 0 ? 'bar-pos' : 'bar-neg') + '"><title>' +
+        esc(fmtDay(d[0]) + ': ' + fmtMoney(v)) + '</title></rect>';
+    });
+    svg.innerHTML = out;
+  }
+
+  function drawCumulative(series) {
+    var svg = document.getElementById('perf-chart');
+    if (!svg) { return; }
+    var ax = drawAxes(svg, series.map(function (d) { return d[1]; }), series);
+    var step = series.length > 1 ? (CH.x1 - CH.x0) / (series.length - 1) : 0;
+    var pts = series.map(function (d, i) {
+      return (CH.x0 + i * step).toFixed(2) + ',' + ax.y(d[1]).toFixed(2);
+    }).join(' ');
+    var last = series.length ? series[series.length - 1][1] : 0;
+    var out = svg.innerHTML +
+      '<polyline points="' + pts + '" class="cum-line ' +
+      (last >= 0 ? 'pos' : 'neg') + '"></polyline>';
+    // A dot per point would be noise over a year; mark only the days that
+    // actually moved the line, which are the days something closed.
+    series.forEach(function (d, i) {
+      if (i && Math.abs(d[1] - series[i - 1][1]) < 0.005) { return; }
+      out += '<circle cx="' + (CH.x0 + i * step).toFixed(2) + '" cy="' +
+        ax.y(d[1]).toFixed(2) + '" r="3" class="cum-dot ' +
+        (last >= 0 ? 'pos' : 'neg') + '"><title>' +
+        esc(fmtDay(d[0]) + ': ' + fmtMoney(d[1])) + '</title></circle>';
+    });
+    svg.innerHTML = out;
+  }
+
+  function setPeriod(key) {
+    var p = periodData[key];
+    if (!p) { return; }
+    activePeriod = key;
+    document.getElementById('perf-title').textContent = p.title;
+    document.getElementById('perf-range').textContent = p.start + ' to ' + p.end;
+    var denom = p.avg_win + Math.abs(p.avg_loss);
+    var rings = document.querySelectorAll('#rings .ring');
+    var spec = [
+      [compact(p.profit), p.win_rate / 100, p.profit >= 0 ? 'pos' : 'neg'],
+      [p.win_rate.toFixed(2) + '<span class="unit">%</span>', p.win_rate / 100, 'pos'],
+      [compact(p.avg_win), denom ? p.avg_win / denom : 0, 'pos'],
+      [compact(p.avg_loss), denom ? Math.abs(p.avg_loss) / denom : 0, 'neg']
+    ];
+    rings.forEach(function (ring, i) {
+      if (!spec[i]) { return; }
+      ring.querySelector('.ring-value').innerHTML = spec[i][0];
+      var arc = ring.querySelector('.ring-arc');
+      arc.setAttribute('class', 'ring-arc ' + spec[i][2]);
+      ringArc(arc, spec[i][1]);
+    });
+    drawChart();
+    document.querySelectorAll('.period-btn').forEach(function (b) {
+      b.classList.toggle('is-active', b.getAttribute('data-period') === key);
+    });
+  }
+
+  var chartView = 'cum';
+  function drawChart() {
+    var p = periodData[activePeriod];
+    if (!p) { return; }
+    var cap = document.getElementById('chart-caption');
+    if (chartView === 'daily') {
+      drawDaily(p.daily);
+      if (cap) { cap.textContent = 'Realized P&L per day'; }
+    } else {
+      drawCumulative(p.cumulative);
+      if (cap) { cap.textContent = 'Cumulative realized P&L'; }
+    }
+    document.querySelectorAll('.chart-btn').forEach(function (b) {
+      b.classList.toggle('is-active', b.getAttribute('data-chart-view') === chartView);
+    });
+  }
+  document.querySelectorAll('.chart-btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      chartView = b.getAttribute('data-chart-view');
+      drawChart();
+    });
+  });
+
+  document.querySelectorAll('.period-btn').forEach(function (b) {
+    b.addEventListener('click', function () { setPeriod(b.getAttribute('data-period')); });
+  });
+
+  // ---- trading journal --------------------------------------------------
+  // All three read the period already on screen, so the journal can never
+  // describe a different range from the rings above it.
+  function monthLabel(iso) {
+    var names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var parts = iso.split('-');
+    return names[parseInt(parts[1], 10) - 1] + ' ' + parts[0];
+  }
+
+  function journalDaily(p) {
+    var run = 0, rows = '';
+    p.daily.forEach(function (d) {
+      run += d[1];
+      if (Math.abs(d[1]) < 0.005) { return; }
+      rows += '<tr><td>' + d[0] + '</td><td class="num ' +
+        (d[1] >= 0 ? 'pos' : 'neg') + '">' + fmtMoney(d[1]) +
+        '</td><td class="num">' + fmtMoney(run) + '</td></tr>';
+    });
+    if (!rows) { rows = '<tr><td colspan="3">No trades closed in this period.</td></tr>'; }
+    return ['Daily Journal', 'Only days on which something actually closed. ' +
+      'A day you held through is not a day you traded.',
+      '<table class="data"><thead><tr><th>Date</th>' +
+      '<th class="num">Realized</th><th class="num">Running</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>'];
+  }
+
+  function journalMonthly(p) {
+    var order = [], by = {};
+    p.daily.forEach(function (d) {
+      var k = d[0].slice(0, 7);
+      if (!(k in by)) { by[k] = { pnl: 0, days: 0 }; order.push(k); }
+      by[k].pnl += d[1];
+      if (Math.abs(d[1]) > 0.005) { by[k].days += 1; }
+    });
+    var run = 0, rows = '';
+    order.forEach(function (k) {
+      run += by[k].pnl;
+      rows += '<tr><td>' + monthLabel(k + '-01') + '</td><td class="num">' +
+        by[k].days + '</td><td class="num ' + (by[k].pnl >= 0 ? 'pos' : 'neg') +
+        '">' + fmtMoney(by[k].pnl) + '</td><td class="num">' + fmtMoney(run) +
+        '</td></tr>';
+    });
+    return ['Monthly Journal', 'Each month in the period, and how many days in it ' +
+      'closed a trade.',
+      '<table class="data"><thead><tr><th>Month</th><th class="num">Active days</th>' +
+      '<th class="num">Realized</th><th class="num">Running</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>'];
+  }
+
+  function journalCalendar(p) {
+    var by = {}, months = [], seen = {};
+    p.daily.forEach(function (d) {
+      by[d[0]] = d[1];
+      var k = d[0].slice(0, 7);
+      if (!seen[k]) { seen[k] = 1; months.push(k); }
+    });
+    // Scale intensity to the biggest absolute day so one huge trade does not
+    // wash every other day out to the same shade.
+    var peak = 0;
+    p.daily.forEach(function (d) { peak = Math.max(peak, Math.abs(d[1])); });
+    var html = '';
+    months.forEach(function (k) {
+      var y = parseInt(k.slice(0, 4), 10), mo = parseInt(k.slice(5, 7), 10);
+      var first = new Date(Date.UTC(y, mo - 1, 1));
+      var lead = first.getUTCDay();
+      var days = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+      var cells = '';
+      for (var i = 0; i < lead; i += 1) { cells += '<span class="cal-cell is-blank"></span>'; }
+      for (var d = 1; d <= days; d += 1) {
+        var iso = k + '-' + (d < 10 ? '0' + d : d);
+        var v = by[iso];
+        var cls = 'cal-cell', style = '';
+        if (v === undefined) {
+          cls += ' is-out';
+        } else if (Math.abs(v) > 0.005) {
+          cls += v > 0 ? ' is-pos' : ' is-neg';
+          style = ' style="opacity:' + (0.35 + 0.65 * Math.abs(v) / (peak || 1)).toFixed(2) + '"';
+        }
+        cells += '<span class="' + cls + '"' + style + ' title="' + iso +
+          (v === undefined ? ' (outside the period)' : ': ' + fmtMoney(v || 0)) +
+          '"><em>' + d + '</em></span>';
+      }
+      html += '<div class="cal-month"><h4>' + monthLabel(k + '-01') + '</h4>' +
+        '<div class="cal-dow"><span>S</span><span>M</span><span>T</span><span>W</span>' +
+        '<span>T</span><span>F</span><span>S</span></div>' +
+        '<div class="cal-grid">' + cells + '</div></div>';
+    });
+    return ['Calendar', 'Each day shaded by what closed on it, strongest on the ' +
+      'biggest day of the period. Blank days are outside it.', html];
+  }
+
+  document.querySelectorAll('.journal-item').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var p = periodData[activePeriod];
+      var dlg = document.getElementById('journal-dlg');
+      if (!p || !dlg || !dlg.showModal) { return; }
+      var kind = b.getAttribute('data-journal');
+      var parts = kind === 'monthly' ? journalMonthly(p)
+        : kind === 'calendar' ? journalCalendar(p) : journalDaily(p);
+      document.getElementById('journal-title').textContent = parts[0] + ' — ' + p.title;
+      document.getElementById('journal-sub').textContent = parts[1];
+      document.getElementById('journal-body').innerHTML = parts[2];
+      dlg.showModal();
+    });
+  });
+
+  // ---- view trades / view statistics ------------------------------------
+  function openTrades() {
+    var p = periodData[activePeriod];
+    var dlg = document.getElementById('trades-dlg');
+    if (!p || !dlg || !dlg.showModal) { return; }
+    document.getElementById('trades-title').textContent = p.title + ' — closed trades';
+    document.getElementById('trades-sub').textContent =
+      p.count + ' trade(s) closed between ' + p.start + ' and ' + p.end
+      + '. These are the rows every figure above is computed from.';
+    document.getElementById('trades-body').innerHTML = p.events.map(function (e) {
+      var cls = e.amount >= 0 ? 'pos' : 'neg';
+      return '<tr><td>' + e.date + '</td><td class="ticker">' + e.key + '</td>'
+        + '<td>' + e.category + '</td><td class="num">' + e.quantity + '</td>'
+        + '<td class="num ' + cls + '">' + fmtMoney(e.amount) + '</td></tr>';
+    }).join('');
+    dlg.showModal();
+  }
+
+  function openStats() {
+    var p = periodData[activePeriod];
+    var dlg = document.getElementById('stats-dlg');
+    if (!p || !dlg || !dlg.showModal) { return; }
+    document.getElementById('stats-title').textContent = p.title + ' — statistics';
+    var rows = [
+      ['Trades closed', String(p.count)],
+      ['Winners', p.wins + ' (' + p.win_rate.toFixed(2) + '%)'],
+      ['Losers', String(p.losses)],
+      ['Total realized', fmtMoney(p.profit)],
+      ['Average win', fmtMoney(p.avg_win)],
+      ['Average loss', fmtMoney(p.avg_loss)],
+      ['Best trade', fmtMoney(p.best)],
+      ['Worst trade', fmtMoney(p.worst)],
+      ['Payoff ratio', p.avg_loss ? (p.avg_win / Math.abs(p.avg_loss)).toFixed(2) : '—']
+    ];
+    document.getElementById('stats-body').innerHTML = rows.map(function (r) {
+      return '<tr><td>' + r[0] + '</td><td class="num">' + r[1] + '</td></tr>';
+    }).join('');
+    dlg.showModal();
+  }
+
+  var vt = document.getElementById('view-trades');
+  var vs = document.getElementById('view-stats');
+  if (vt) { vt.addEventListener('click', openTrades); }
+  if (vs) { vs.addEventListener('click', openStats); }
+
+  if (Object.keys(periodData).length) { setPeriod(Object.keys(periodData)[0]); }
 
   // ---- per-ticker drill-down -------------------------------------------
   // Built from the transaction rows themselves, in date order, accumulating
@@ -873,6 +1329,152 @@ def _txn_sub_head(m: Metrics) -> str:
     return base
 
 
+_RING_R = 46
+_RING_C = 2 * 3.141592653589793 * _RING_R
+
+
+def _ring(value_html: str, sub: str, frac: float, tone: str) -> str:
+    """One stat ring.
+
+    `frac` is drawn as an arc so each ring says something rather than decorating
+    a number: the profit and win-rate rings show the share of trades that won,
+    and the average win/loss pair show the payoff ratio between them — two rings
+    that are complements of each other, which is the point.
+    """
+    frac = 0.0 if frac != frac else max(0.0, min(1.0, frac))   # NaN-safe
+    dash = f"{frac * _RING_C:.2f} {_RING_C:.2f}"
+    return f"""<div class="ring">
+      <svg viewBox="0 0 120 120" role="img">
+        <circle class="ring-track" cx="60" cy="60" r="{_RING_R}"></circle>
+        <circle class="ring-arc {tone}" cx="60" cy="60" r="{_RING_R}"
+                stroke-dasharray="{dash}" transform="rotate(-90 60 60)"></circle>
+      </svg>
+      <div class="ring-value">{value_html}</div>
+      <div class="ring-label">{esc(sub)}</div>
+    </div>"""
+
+
+def _compact(v: float) -> str:
+    """$4.60k rather than $4,600.00 — a ring has room for a shape, not a ledger."""
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+    if a >= 1000:
+        return f'{sign}${a / 1000:,.2f}<span class="unit">k</span>'
+    return f"{sign}${a:,.2f}"
+
+
+def _performance_section(periods: list, anchor: str) -> str:
+    """Period selector, the four rings, one wide chart, and the journal card.
+
+    A single wide chart rather than two side by side: the daily bars and the
+    cumulative line answer the same question at different resolutions, and
+    showing both at half width makes each too small to read. They share the
+    space and a toggle instead.
+
+    Every period is embedded; the buttons switch between answers computed at
+    build time, because a downloaded file has nothing to ask for a new one.
+    """
+    if not periods:
+        return ""
+    current = periods[0]
+    t = current.trades
+    denom = t.avg_win + abs(t.avg_loss)
+    buttons = "".join(
+        f'<button class="period-btn{" is-active" if p is current else ""}" '
+        f'data-period="{esc(p.key)}" type="button">{esc(p.label)}</button>'
+        for p in periods)
+    rings = "".join([
+        _ring(_compact(t.total), "Profit", t.win_rate / 100.0,
+              "pos" if t.total >= 0 else "neg"),
+        _ring(f'{t.win_rate:.2f}<span class="unit">%</span>', "Winning trades",
+              t.win_rate / 100.0, "pos"),
+        _ring(_compact(t.avg_win), "Avg win",
+              (t.avg_win / denom) if denom else 0.0, "pos"),
+        _ring(_compact(t.avg_loss), "Avg loss",
+              (abs(t.avg_loss) / denom) if denom else 0.0, "neg"),
+    ])
+    return f"""
+  <section class="perf-wrap" id="performance">
+    <div class="card perf">
+      <div class="perf-head">
+        <div class="perf-title">
+          <h2 id="perf-title">{esc(current.title)}</h2>
+          <p class="perf-range" id="perf-range">{esc(current.start.isoformat())} to
+            {esc(current.end.isoformat())}</p>
+        </div>
+        <div class="rings" id="rings">{rings}</div>
+      </div>
+      <figure class="perf-chart">
+        <figcaption>
+          <span id="chart-caption">Cumulative realized P&amp;L</span>
+          <span class="chart-toggle" role="group" aria-label="Chart view">
+            <button class="chart-btn is-active" data-chart-view="cum"
+                    type="button">Cumulative</button>
+            <button class="chart-btn" data-chart-view="daily"
+                    type="button">Daily</button>
+          </span>
+        </figcaption>
+        <svg id="perf-chart" viewBox="0 0 900 300"
+             role="img" aria-label="Realized profit and loss"></svg>
+      </figure>
+      <p class="perf-note">Periods run back from <strong>{esc(anchor)}</strong>, the
+        last activity date in these statements &mdash; not from today, so this page
+        reads the same whenever it is opened. Figures here are realized trading P&amp;L
+        only; dividends, fees and subscriptions are in the summary below.</p>
+      <div class="perf-actions">
+        <button class="ghost-btn" id="view-trades" type="button">View trades</button>
+        <button class="ghost-btn" id="view-stats" type="button">View statistics</button>
+      </div>
+    </div>
+
+    <aside class="perf-side">
+      <div class="period-bar" role="group" aria-label="Reporting period">{buttons}</div>
+      <div class="card journal">
+        <h3>Trading Journal</h3>
+        <button class="journal-item" data-journal="daily" type="button">
+          <span class="jicon" aria-hidden="true">&#9711;</span>Daily Journal</button>
+        <button class="journal-item" data-journal="monthly" type="button">
+          <span class="jicon" aria-hidden="true">&#9776;</span>Monthly Journal</button>
+        <button class="journal-item" data-journal="calendar" type="button">
+          <span class="jicon" aria-hidden="true">&#9639;</span>Calendar</button>
+      </div>
+    </aside>
+  </section>"""
+
+
+def _period_dialogs() -> str:
+    """Shells for "View trades" and "View statistics".
+
+    Both are filled from the embedded period data on open, so they can never
+    show a different period from the rings above them.
+    """
+    return """<dialog id="trades-dlg">
+      <form method="dialog" class="drill-head">
+        <h3 id="trades-title"></h3><button value="close">Close</button>
+      </form>
+      <p class="sub-head" id="trades-sub"></p>
+      <div class="table-scroll"><table class="data"><thead><tr>
+        <th>Date</th><th>Position</th><th>Kind</th>
+        <th class="num">Qty</th><th class="num">Realized</th>
+      </tr></thead><tbody id="trades-body"></tbody></table></div>
+    </dialog>
+    <dialog id="journal-dlg">
+      <form method="dialog" class="drill-head">
+        <h3 id="journal-title"></h3><button value="close">Close</button>
+      </form>
+      <p class="sub-head" id="journal-sub"></p>
+      <div id="journal-body" class="table-scroll"></div>
+    </dialog>
+    <dialog id="stats-dlg">
+      <form method="dialog" class="drill-head">
+        <h3 id="stats-title"></h3><button value="close">Close</button>
+      </form>
+      <p class="sub-head">Every figure below is computed from the same closed
+        trades listed under <em>View trades</em>.</p>
+      <table class="data"><tbody id="stats-body"></tbody></table>
+    </dialog>"""
+
+
 def _drill_dialog() -> str:
     """An empty shell the page fills in from rows it already has.
 
@@ -1038,7 +1640,8 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
                files_read: list[str], row_errors: list[str],
                interactive: bool = False,
                cost_basis: CostBasis = CostBasis.AVERAGE,
-               all_rows: list | None = None) -> str:
+               all_rows: list | None = None,
+               periods: list | None = None) -> str:
     """
     Render the whole page.
 
@@ -1161,6 +1764,23 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
             swatch=category_color(c), neutral=True, inset=True))
 
     table_rows = all_rows if all_rows is not None else classified
+    periods = periods or []
+    anchor = periods[0].end.isoformat() if periods else (
+        m.full_range[1] if m.full_range else "")
+    period_payload = json.dumps({
+        p.key: {
+            "title": p.title, "start": p.start.isoformat(), "end": p.end.isoformat(),
+            "profit": round(p.profit, 2), "count": p.trades.count,
+            "wins": len(p.trades.wins), "losses": len(p.trades.losses),
+            "win_rate": round(p.trades.win_rate, 2),
+            "avg_win": round(p.trades.avg_win, 2),
+            "avg_loss": round(p.trades.avg_loss, 2),
+            "best": round(p.trades.best, 2), "worst": round(p.trades.worst, 2),
+            "daily": [[d, round(v, 2)] for d, v in p.daily],
+            "cumulative": [[d, round(v, 2)] for d, v in p.cumulative],
+            "events": p.events,
+        } for p in periods
+    }, separators=(",", ":"))
     extra_css = INTERACTIVE_CSS if interactive else ""
     extra_js = INTERACTIVE_JS if interactive else ""
     actions_html = _header_actions() if interactive else ""
@@ -1185,12 +1805,16 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
 
   {callout_html}
 
+  {_performance_section(periods, anchor)}
+
   {_summary_section(m, cost_basis)}
 
   {_open_positions_section(m, positions)}
 
   {_by_ticker_section(m)}
   {_drill_dialog()}
+  {_period_dialogs()}
+  <script type="application/json" id="period-data">{period_payload}</script>
 
   <section class="kpi-row">{"".join(kpis)}</section>
 

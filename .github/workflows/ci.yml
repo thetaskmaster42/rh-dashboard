@@ -75,6 +75,15 @@ jobs:
           node --check /tmp/page.js
           echo "inline script parses"
 
+      - name: The page's charts must actually draw
+        # `node --check` above proves the script parses. It cannot prove a
+        # chart renders: a selector typo, a scale that divides by zero, or an
+        # axis that yields no ticks all parse perfectly and leave an empty
+        # <svg> on the page. This runs the page's own script against a stub DOM
+        # and asserts real marks came out. Container has no node, so it lives
+        # here rather than in selftest.
+        run: node .github/scripts/render_charts.js /tmp/preview/dashboard.html
+
       - name: The generated page must open offline
         # Group 8 asserts this too; repeated here because it is the project's
         # central promise and worth failing loudly and early on.
