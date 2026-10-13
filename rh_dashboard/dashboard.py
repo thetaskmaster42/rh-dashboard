@@ -204,8 +204,12 @@ td.muted { color: var(--text-secondary); opacity: .55; }
   margin: 24px 0 4px; }
 .control { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
   color: var(--text-secondary); }
-.control select { font: inherit; color: var(--text-primary); padding: 5px 8px;
+.control select, .control input[type=date], .control-clear { font: inherit;
+  color: var(--text-primary); padding: 5px 8px;
   border-radius: 7px; border: 1px solid var(--border); background: var(--surface-1); }
+.control input[type=date] { color-scheme: light dark; }
+.control-clear { font-size: 12px; cursor: pointer; }
+.controls.in-card { margin: 0 0 12px; }
 .control input[type=checkbox] { accent-color: var(--series-1); }
 .filter-count { font-size: 11.5px; color: var(--text-secondary); }
 .legend-chip { cursor: default; }
@@ -441,6 +445,9 @@ JS = """
 
   var catSel = document.getElementById('f-cat');
   var tickerSel = document.getElementById('f-ticker');
+  var fromInp = document.getElementById('f-from');
+  var toInp = document.getElementById('f-to');
+  var clearBtn = document.getElementById('f-clear');
   var outsideBox = document.getElementById('f-outside');
   var countEl = document.getElementById('f-count');
 
@@ -460,6 +467,9 @@ JS = """
     var cat = catSel ? catSel.value : '';
     var ticker = tickerSel ? tickerSel.value : '';
     var showOutside = outsideBox ? outsideBox.checked : true;
+    // ISO dates order the same as strings, so no Date parsing is needed.
+    var from = fromInp ? fromInp.value : '';
+    var to = toInp ? toInp.value : '';
 
     document.querySelectorAll('[data-chart] [data-key]').forEach(function (el) {
       var k = el.getAttribute('data-key');
@@ -469,8 +479,11 @@ JS = """
     var shown = 0, total = 0;
     document.querySelectorAll('#txn-table tbody tr[data-key]').forEach(function (tr) {
       total += 1;
+      var d = tr.getAttribute('data-date');
       var hide = (cat !== '' && tr.getAttribute('data-key') !== cat)
               || (ticker !== '' && tr.getAttribute('data-ticker') !== ticker)
+              || (from !== '' && d < from)
+              || (to !== '' && d > to)
               || (!showOutside && tr.getAttribute('data-in-window') === 'false');
       tr.classList.toggle('hidden-row', hide);
       if (!hide) { shown += 1; }
@@ -480,6 +493,7 @@ JS = """
         ? total + ' transactions'
         : shown + ' of ' + total + ' transactions';
     }
+    if (clearBtn) { clearBtn.hidden = (ticker === '' && from === '' && to === ''); }
     // The legend dims what the chart is no longer drawing, so the two agree.
     document.querySelectorAll('.legend-chip[data-key]').forEach(function (chip) {
       chip.style.opacity = (cat === '' || chip.getAttribute('data-key') === cat)
@@ -903,6 +917,16 @@ JS = """
 
   if (catSel) { catSel.addEventListener('change', applyFilter); }
   if (tickerSel) { tickerSel.addEventListener('change', applyFilter); }
+  if (fromInp) { fromInp.addEventListener('change', applyFilter); }
+  if (toInp) { toInp.addEventListener('change', applyFilter); }
+  if (clearBtn) {
+    clearBtn.addEventListener('click', function () {
+      if (tickerSel) { tickerSel.value = ''; }
+      if (fromInp) { fromInp.value = ''; }
+      if (toInp) { toInp.value = ''; }
+      applyFilter();
+    });
+  }
   if (outsideBox) { outsideBox.addEventListener('change', applyFilter); }
   applyFilter();
 
@@ -1319,10 +1343,12 @@ def _txn_heading(m: Metrics, in_window: list, table_rows: list) -> str:
 
 
 def _txn_sub_head(m: Metrics) -> str:
-    base = ("Every row after de-duplication, newest first. Use the dropdowns above to "
-            "filter by category or ticker. Amount is raw cash as it appears in the "
-            "statement; <em>To net income</em> in a ticker's breakdown is the realized "
-            "figure, which is why a purchase contributes nothing.")
+    base = ("Every row after de-duplication, newest first. Filter by date or ticker "
+            "here, or by category with the dropdown above the charts. The filters only "
+            "choose which rows are listed — no figure on this page changes. Amount is "
+            "raw cash as it appears in the statement; <em>To net income</em> in a "
+            "ticker's breakdown is the realized figure, which is why a purchase "
+            "contributes nothing.")
     if m.window:
         return (base + " Rows outside the window are hidden by default — show them to "
                 "see the purchase behind a sale that this window reports a gain on.")
@@ -1497,8 +1523,8 @@ def _drill_dialog() -> str:
     </dialog>"""
 
 
-def _controls(m: Metrics, include_other: bool) -> str:
-    """Category and ticker dropdowns, plus the out-of-window toggle.
+def _controls(include_other: bool) -> str:
+    """The category dropdown, which drives the charts and the table together.
 
     The chips became a legend. They were doing two jobs — explaining the chart
     colours and filtering — and a dropdown says "pick one" far more clearly
@@ -1513,11 +1539,33 @@ def _controls(m: Metrics, include_other: bool) -> str:
         seen.add(key)
         cats.append(f'<option value="{esc(key)}">{esc(key)}</option>')
 
+    return f"""<div class="controls">
+      <label class="control"><span>Category</span>
+        <select id="f-cat"><option value="">All categories</option>
+        {"".join(cats)}</select></label>
+    </div>"""
+
+
+def _txn_controls(m: Metrics, table_rows: list) -> str:
+    """Date range and ticker filters, plus the out-of-window toggle.
+
+    These sit inside the transactions card because the table is all they act
+    on — the charts follow the category dropdown only. They choose which rows
+    are *listed* and nothing else: the drill-down and every figure on the page
+    are built from all rows whatever is hidden here, and a date range typed
+    into this bar is not a window. `--from`/`--to` is what re-reports a period.
+    """
     tickers = [t.ticker for t in m.by_ticker]
     if abs(m.unattributed.net_contribution) > 0.005:
         tickers.append(UNATTRIBUTED_KEY)
     opts = "".join(f'<option value="{esc(t)}">{esc(t)}</option>'
                    for t in sorted(tickers))
+
+    # Bounding the pickers to the rows on the page keeps a typo from silently
+    # emptying the table.
+    dates = [c.txn.activity_date for c in table_rows]
+    bounds = (f' min="{min(dates).isoformat()}" max="{max(dates).isoformat()}"'
+              if dates else "")
 
     window_toggle = ""
     if m.window:
@@ -1528,14 +1576,16 @@ def _controls(m: Metrics, include_other: bool) -> str:
             '<label class="control"><input type="checkbox" id="f-outside">'
             '<span>Show rows outside the window</span></label>')
 
-    return f"""<div class="controls">
-      <label class="control"><span>Category</span>
-        <select id="f-cat"><option value="">All categories</option>
-        {"".join(cats)}</select></label>
+    return f"""<div class="controls in-card">
+      <label class="control"><span>From</span>
+        <input type="date" id="f-from"{bounds}></label>
+      <label class="control"><span>To</span>
+        <input type="date" id="f-to"{bounds}></label>
       <label class="control"><span>Ticker</span>
         <select id="f-ticker"><option value="">All tickers</option>
         {opts}</select></label>
       {window_toggle}
+      <button type="button" class="control-clear" id="f-clear" hidden>Clear</button>
       <span class="filter-count" id="f-count"></span>
     </div>"""
 
@@ -1818,7 +1868,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
 
   <section class="kpi-row">{"".join(kpis)}</section>
 
-  {_controls(m, bool(m.other_count))}
+  {_controls(bool(m.other_count))}
   <div class="filter-row">{_legend_chips(bool(m.other_count))}</div>
 
   {_chart_card("Cumulative net income over time",
@@ -1836,6 +1886,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
   <div class="card">
     <h2>{_txn_heading(m, classified, table_rows)}</h2>
     <p class="sub-head">{_txn_sub_head(m)}</p>
+    {_txn_controls(m, table_rows)}
     <div class="table-scroll">{_transactions_table(table_rows, positions, m.window)}</div>
   </div>
 
