@@ -21,7 +21,7 @@ is unchanged and CI enforces it.
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest    # 562 assertions across 15 groups
+uv run ./rh-dashboard selftest    # 575 assertions across 15 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
@@ -64,9 +64,11 @@ a same-day corporate action across the boundary.
 
 ### Filtering and drill-down
 
-The page carries two dropdowns — category and ticker — that filter the
-transaction table and the charts together, and a click on any row of the
-By ticker table opens that ticker's full history with a running cumulative
+A category dropdown above the charts filters the charts and the transaction
+table together. The transaction table has its own bar — a from/to date range
+and a ticker dropdown — which only chooses the rows listed: no figure on the
+page moves, and a date range typed there is not a `--from`/`--to` window. A
+click on any row of the By ticker table opens that ticker's full history with a running cumulative
 net income column. Under a date window, rows outside it are kept and marked,
 with a toggle to reveal them: a July report showing a gain on AAPL is only
 checkable if the June purchase behind it is one click away.

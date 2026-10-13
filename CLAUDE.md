@@ -20,6 +20,13 @@ life there were none at all, and the rule was enforced by asserting that
 deliberately: **DuckDB** is the analytical store for the date-window work, and
 dependencies are managed with **uv**.
 
+**DuckDB is declared but not yet load-bearing.** The only module that imports
+it is `selftest.py` (group 10, which proves the wheel installs and queries).
+The pipeline — including the date windows that shipped — is still pure
+standard library, so do not go looking for a `.duckdb` file or a SQL view that
+explains a number on the page; the figures come from `positions.py` and
+`metrics.py`.
+
 What did *not* change is the reason the rule existed. The HTTP server is still
 `http.server` rather than Flask. There is still no lint or format
 configuration, no `Makefile`, and no packaging: `pyproject.toml` sets
@@ -47,12 +54,18 @@ runs `uv sync --frozen --no-dev` in its own layer, keyed on the lockfile, so a
 source edit does not re-resolve dependencies. `--frozen` everywhere means a
 build that would need to change `uv.lock` fails instead of silently upgrading
 DuckDB.
+
 `.github/workflows/ci.yml` has four jobs, and each one guards a rule stated
 elsewhere in this file:
 
 - **selftest** on 3.11-3.13. Runs `check_imports.py` first, then
   `uv sync --frozen` and `uv run --frozen ./rh-dashboard selftest`.
-  Then builds the sample page and greps it: no `<script src=`, no
+  Then builds the sample page, extracts its one inline `<script>` and runs
+  `node --check` over it — **nothing local parses the page's JavaScript**
+  (group 14 only checks it structurally, and the container has no node), so a
+  syntax error in the JS block of `dashboard.py` passes `selftest` and fails
+  here. The same step asserts there is exactly one non-JSON script block.
+  Then it greps the page: no `<script src=`, no
   `rel="stylesheet"`, and **no `https?://` anywhere in the output HTML at
   all**. That last one is the easy trap — a documentation link, a source URL,
   even one inside an HTML comment, fails the build. Keep URLs out of
@@ -83,7 +96,8 @@ elsewhere in this file:
   *inside it*, then boots it and drives `/healthz` → `/api/upload` → `/`.
 
 `release.yml` publishes a multi-arch image and the packaged chart to GHCR on a
-`v*` tag, never from `main`.
+`v*` tag, never from `main`, and runs the suite first so a tag that fails
+`selftest` publishes nothing.
 
 The CLI resolves its default input/output paths from `__file__`, not the
 working directory, so it behaves the same whichever folder you invoke it from.
@@ -97,12 +111,20 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 562 assertions across 15 groups
+uv run ./rh-dashboard selftest                       # 575 assertions across 15 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
 by name; it always runs all 15 groups. Group 9 binds a real socket on port 0 and
 drives the handler over HTTP, so it needs no network but does need loopback.
+
+`--from`/`--to` exist on `build` only. `serve` takes no window — the served
+page is always full-history.
+
+`docs/plan-*.md` are design records written before the work, not descriptions
+of the current state: the status header of `plan-date-window.md` still says
+the window is unreachable from the CLI, which stopped being true. Trust the
+code and this file over them.
 
 `input/*.csv` and `output/*.html` are gitignored: run output here is real
 account data and is deliberately **not** committed. Only `sample_data/`
@@ -181,7 +203,7 @@ metrics asks `positions.py` for the realized figures.
    calls at different strikes must not match); equity keys on ticker. Closing
    more than the statements account for is counted at full proceeds and
    **warned about**, never silently guessed.
-   Two ordering/semantic rules live here and are easy to break:
+   The rules that live here and are easy to break:
    - **Opens are processed before closes on the same date** (`_phase`).
      Statements carry a date but no time and export newest-first, so raw file
      order lists a same-day sell above the buy that funded it — which produced
@@ -258,7 +280,8 @@ metrics asks `positions.py` for the realized figures.
    `months` come from the window rather than from the rows, so a quiet first or
    last month cannot shrink the axis, and `_empty` is suppressed under a window
    because "nothing happened this period, here is what you were holding" is a
-   legitimate report that zeros would misstate. That last term is normally zero — a merger
+   legitimate report that zeros would misstate. The corporate-action-cash term
+   of the identity is normally zero — a merger
    moves shares, not money — but a cash-plus-stock merger does move cash and
    reaches neither income nor transfers, so leaving it implicit made a correct
    run fail to reconcile for a reason the banner could not name. **If you
@@ -273,9 +296,12 @@ metrics asks `positions.py` for the realized figures.
    categories already spend the categorical palette's validated 8-slot ceiling.
    **`dashboard.py`** assembles the page: Summary (net income + the two-column
    calculation/reconciliation tables), the open-positions table, stat tiles,
-   the category/ticker dropdowns (`_controls`) — the legend keeps its
+   the category dropdown (`_controls`) — the legend keeps its
    swatches but **stopped being the filter**, since eight independently
    toggleable pills had no notion of "all" and no obvious starting state — the
+   date-range and ticker filters inside the transactions card
+   (`_txn_controls`; **they hide rows and change no figure** — the in-page date
+   range is not a `Window`, and the drill-down still accumulates every row), the
    by-ticker rollup and its drill-down `<dialog>`, transaction table, the
    window callout and the
    as-of-date caption (**every "still held" string on the page must agree with

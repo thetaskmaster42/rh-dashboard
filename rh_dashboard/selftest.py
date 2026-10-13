@@ -1650,6 +1650,24 @@ def _group_14_controls():
         check("the ticker dropdown is present", 'id="f-ticker"' in page, True)
         check("no window means no out-of-window toggle",
               'id="f-outside"' in page, False)
+
+        # The date and ticker filters act on the table alone, so they live in
+        # its card. Bounds come from the rows, or a picker could offer a date
+        # that empties the table.
+        txn_card = page[page.index("All transactions ("):page.index("<footer>")]
+        for ident in ("f-from", "f-to", "f-ticker", "f-clear", "f-count"):
+            check(f"#{ident} sits in the transactions card",
+                  f'id="{ident}"' in txn_card, True)
+        check("the category dropdown stays with the charts it drives",
+              'id="f-cat"' in txn_card, False)
+        row_dates = re.findall(r'<tr data-key="[^"]*" data-ticker="[^"]*" '
+                               r'data-date="([^"]*)"', page)
+        for ident in ("f-from", "f-to"):
+            bounds = re.search(rf'id="{ident}" min="([^"]*)" max="([^"]*)"', page)
+            check(f"#{ident} is bounded by the rows on the page",
+                  bounds and bounds.groups(), (min(row_dates), max(row_dates)))
+        check("the script compares the row's date against both ends",
+              "d < from" in source and "d > to" in source, True)
         check("the legend no longer carries filter state",
               "data-active" in page, False)
 
@@ -1690,6 +1708,9 @@ def _group_14_controls():
         inside = len(re.findall(r'data-in-window="true"', wpage))
         outside = len(re.findall(r'data-in-window="false"', wpage))
         check("in-window rows are marked", inside, 15)
+        check("the date pickers span every row, not just the window",
+              re.search(r'id="f-from" min="([^"]*)"', wpage).group(1) < "2026-07-01",
+              True)
         check("out-of-window rows are kept, not dropped", outside, 12)
         check("the june purchase behind july's gain is on the page",
               'data-ticker="AAPL" data-date="2026-06-03"' in wpage, True)
