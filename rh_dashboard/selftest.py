@@ -20,6 +20,7 @@ The two groups that matter:
 from __future__ import annotations
 
 import base64
+import dataclasses
 import html as html_mod
 import json
 import re
@@ -37,6 +38,7 @@ from .loader import LoadError, load_file, load_folder
 from .metrics import TradeStats, compute
 from .periods import _months_before, compute_periods
 from .model import Category, Classified, CostBasis, Transaction, Window
+from .dashboard import _row_ledger
 from .pipeline import build_dashboard
 from .positions import compute_positions, compute_windowed, normalise_contract
 
@@ -111,6 +113,17 @@ def _ticker_column(page: str) -> list[tuple[str, float]]:
         if raw in ("", "\u2014"):
             continue
         out.append((cells[0], float(raw.lstrip("+-")) * (-1 if raw.startswith("-") else 1)))
+    return out
+
+
+def _ticker_month(page: str) -> dict[tuple[str, str], tuple[float, int]]:
+    """(month, ticker) -> (net P&L, closed trades), in the order rendered."""
+    block = page.split('id="tm-table"')[1].split("<tfoot>")[0]
+    out = {}
+    for mk, pnl, trades, name in re.findall(
+            r'data-month="([^"]*)" data-pnl="([-0-9.]+)" data-trades="(\d+)">'
+            r'<td class="ticker">([^<]*)</td>', block):
+        out[(mk, html_mod.unescape(name))] = (round(float(pnl), 2), int(trades))
     return out
 
 
@@ -1588,8 +1601,61 @@ def _group_13_by_ticker():
         check("the printed total is net income", printed[-1][1], m.net_income)
         check("Unattributed is shown, not folded away",
               any(n == "Unattributed" for n, _ in printed), True)
+
+        # --- by ticker and month ---------------------------------------
+        # Hand-derived from the fixtures: a month is the month a trade closed.
+        tm = _ticker_month(page)
+        check("ticker-month rows, newest month first", list(tm), [
+            ("2026-07", "AAPL"), ("2026-07", "MSFT"), ("2026-07", "TSLA"),
+            ("2026-07", "Unattributed"), ("2026-06", "SPY"),
+            ("2026-06", "Unattributed")])
+        check("AAPL july: 1,250 sale + 210 call + 3.10 dividend",
+              tm[("2026-07", "AAPL")], (1463.10, 2))
+        check("TSLA july: the rolled call closed once, the new leg is open",
+              tm[("2026-07", "TSLA")], (-150.00, 1))
+        check("SPY june: the round trip and its dividend", tm[("2026-06", "SPY")],
+              (108.75, 1))
+        check("a month with only a purchase is not listed",
+              any(t == "NVDA" for _, t in tm), False)
+        for t in m.by_ticker:
+            check(f"{t.ticker}: its months add up to its by-ticker figure",
+                  sum(v[0] for (_, tk), v in tm.items() if tk == t.ticker),
+                  t.net_contribution)
+        check("every month adds up to net income",
+              sum(v[0] for v in tm.values()), m.net_income)
+        check("closed trades add up to the trade count",
+              sum(v[1] for v in tm.values()), m.trades.count)
+        check("the printed footer is net income",
+              re.search(r'id="tm-total">([^<]*)<', page).group(1), "+$998.16")
+        offered = re.findall(r'<option value="(\d{4}-\d\d)"',
+                             page.split('id="f-month"')[1].split("</select>")[0])
+        check("the month filter offers exactly the months listed", offered,
+              ["2026-07", "2026-06"])
+        check("the script reads the month filter",
+              "getElementById('f-month')" in _page_scripts(page)[0][0], True)
+
+        wres = build_dashboard(input_dir=SAMPLE, output_dir=tmp, filename="w.html",
+                               start=date(2026, 7, 1), end=date(2026, 7, 31))
+        wtm = _ticker_month(Path(wres["output"]).read_text(encoding="utf-8"))
+        check("july window: only july is grouped", {mk for mk, _ in wtm}, {"2026-07"})
+        check("july window: months add up to the windowed net income",
+              sum(v[0] for v in wtm.values()), jul.net_income)
     finally:
         shutil.rmtree(tmp)
+
+    # A same-day BTO, BTO, STC on one contract. Opens sort first and all three
+    # share a key, so the first BTO used to take the STC's P&L.
+    c = "TEST 1/30/2026 Call $10.00"
+    rows = [_trade(5, "BTO", 1, -182.04, description=c, category=Category.OPTIONS),
+            _trade(5, "BTO", 1, -1629.36, description=c, category=Category.OPTIONS),
+            _trade(5, "STC", 2, 2309.52, description=c, category=Category.OPTIONS)]
+    rows = [Classified(txn=dataclasses.replace(r.txn, row_index=i + 1),
+                       category=r.category, reason=r.reason, fallback=r.fallback)
+            for i, r in enumerate(rows)]
+    income, closed = _row_ledger(rows, compute_positions(rows))
+    check("same-day opens carry no income, the close carries all of it",
+          [income[("fixture.csv", i)] for i in (1, 2, 3)], [0.0, 0.0, 498.12])
+    check("...and only the close counts as a trade", closed, {("fixture.csv", 3)})
 
 
 def _page_scripts(page: str) -> tuple[list[str], list[str]]:

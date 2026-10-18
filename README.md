@@ -21,7 +21,7 @@ is unchanged and CI enforces it.
 ./rh-dashboard serve              # same thing, served, with CSV upload
 ./rh-dashboard build --cost-basis fifo   # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest    # 575 assertions across 15 groups
+uv run ./rh-dashboard selftest    # 603 assertions across 15 groups
 ```
 
 Then open `output/dashboard.html` in a browser, or `http://127.0.0.1:8080` if
@@ -94,6 +94,13 @@ sum(per-ticker contributions) + unattributed  ==  net income
 
 which the test suite asserts, and which the page proves by printing a total
 that matches the headline figure.
+
+**By ticker and month** splits the same figure again by calendar month, with
+the number of trades that closed, and a month filter whose footer re-totals to
+that month's net income. A trade belongs to the month it **closed**: buy in
+June and sell in July and it is all July's, while June lists nothing for it.
+Opening trades are not counted as trades. Every ticker's months add up to its
+By ticker figure, and every month adds up to net income.
 
 ### Cost basis
 
