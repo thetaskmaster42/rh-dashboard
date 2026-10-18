@@ -15,15 +15,16 @@ already spend the categorical palette's validated eight-slot ceiling.
 """
 from __future__ import annotations
 
+import calendar
 import json
 from datetime import datetime, timezone
 
 from .assets import FAVICON_DATA_URI
-from .metrics import Metrics
+from .metrics import Metrics, month_key
 from .model import (CATEGORY_ORDER, FALLBACK_CATEGORIES, INCOME_CATEGORIES,
                     LOT_MATCHED_CATEGORIES, PRIMARY_CATEGORIES,
                     TRANSFER_CATEGORIES, Category, CostBasis)
-from .positions import PositionsResult, _phase, _position_key
+from .positions import OPENING_CODES, PositionsResult, _phase, _position_key
 
 # Rows that reach net income as their own cash. Lot-matched categories are
 # excluded because only a closing row contributes, and it contributes realized
@@ -903,8 +904,10 @@ JS = """
         var body = table.tBodies[0];
         var rows = Array.prototype.slice.call(body.rows);
         rows.sort(function (a, b) {
-          var x = a.cells[idx].textContent.trim();
-          var y = b.cells[idx].textContent.trim();
+          // data-sort carries a key that sorts correctly where the visible
+          // text does not, such as "Sep 2026" against "Oct 2026".
+          var x = a.cells[idx].getAttribute('data-sort') || a.cells[idx].textContent.trim();
+          var y = b.cells[idx].getAttribute('data-sort') || b.cells[idx].textContent.trim();
           var nx = parseFloat(x.replace(/[$,\u2014]/g, ''));
           var ny = parseFloat(y.replace(/[$,\u2014]/g, ''));
           var cmp = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
@@ -914,6 +917,29 @@ JS = """
       });
     });
   });
+
+  // ---- by ticker and month ---------------------------------------------
+  // The footer re-totals what is visible, so a single month reads as that
+  // month's net income and its closed-trade count.
+  var monthSel = document.getElementById('f-month');
+  function applyMonth() {
+    var want = monthSel.value, pnl = 0, trades = 0;
+    document.querySelectorAll('#tm-table tbody tr[data-month]').forEach(function (tr) {
+      var hide = want !== '' && tr.getAttribute('data-month') !== want;
+      tr.classList.toggle('hidden-row', hide);
+      if (!hide) {
+        pnl += parseFloat(tr.getAttribute('data-pnl')) || 0;
+        trades += parseInt(tr.getAttribute('data-trades'), 10) || 0;
+      }
+    });
+    var totalEl = document.getElementById('tm-total');
+    totalEl.textContent = (pnl < -0.004 ? '-' : '+') + fmtMoney(Math.abs(pnl));
+    totalEl.className = 'num ' + (pnl < -0.004 ? 'neg' : 'pos');
+    document.getElementById('tm-trades').textContent = String(trades);
+    document.getElementById('tm-total-label').textContent =
+      want === '' ? 'All months' : monthSel.options[monthSel.selectedIndex].text;
+  }
+  if (monthSel) { monthSel.addEventListener('change', applyMonth); }
 
   if (catSel) { catSel.addEventListener('change', applyFilter); }
   if (tickerSel) { tickerSel.addEventListener('change', applyFilter); }
@@ -1253,6 +1279,91 @@ def _by_ticker_section(m: Metrics) -> str:
         <td class="num"></td><td class="num"></td><td class="num"></td>
         <td class="num"></td>
         <td class="num {_sign_class(total)}">{_signed_money(total)}</td>
+      </tr></tfoot>
+    </table></div>
+  </section>"""
+
+
+def _month_label(key: str) -> str:
+    year, month = key.split("-")
+    return f"{calendar.month_abbr[int(month)]} {year}"
+
+
+def _ticker_month_section(m: Metrics, positions: PositionsResult, table_rows: list) -> str:
+    """Net income per ticker per month, with the closed trades behind it.
+
+    Grouped from the same per-row figures the transaction table carries, so a
+    ticker's months add up to its By ticker figure, and every month adds up to
+    net income, by construction rather than by a second calculation. A month is
+    the month a trade **closed**: a position bought in June and sold in July is
+    July's P&L, and June shows nothing for it, because buying realizes nothing.
+
+    Under a window only rows inside it are grouped. A row outside contributes
+    nothing to the report, and listing its month as a zero would read as "a
+    quiet month" rather than "not part of this report".
+    """
+    income, closed = _row_ledger(table_rows, positions, m.window)
+    groups: dict[tuple[str, str], list] = {}
+    for c in table_rows:
+        t = c.txn
+        if m.window is not None and not m.window.contains(t.activity_date):
+            continue
+        ident = (t.source_file, t.row_index)
+        key = (month_key(t.activity_date), t.instrument.strip() or UNATTRIBUTED_KEY)
+        g = groups.setdefault(key, [0.0, 0])
+        g[0] += income.get(ident, 0.0)
+        g[1] += ident in closed
+    # A ticker that was only bought that month realized nothing and closed
+    # nothing; a row of zeros for it is noise, not information.
+    groups = {k: v for k, v in groups.items() if abs(v[0]) > 0.005 or v[1]}
+    if not groups:
+        return ""
+
+    months = sorted({k[0] for k in groups}, reverse=True)
+    rows = []
+    for (mk, ticker), (pnl, trades) in sorted(
+            groups.items(), key=lambda kv: (kv[0][0], kv[0][1] == UNATTRIBUTED_KEY,
+                                            kv[0][1]), reverse=False):
+        name = "Unattributed" if ticker == UNATTRIBUTED_KEY else ticker
+        cls = "drill excluded" if ticker == UNATTRIBUTED_KEY else "drill"
+        rows.append(
+            f'<tr class="{cls}" data-ticker="{esc(ticker)}" data-month="{mk}" '
+            f'data-pnl="{pnl:.2f}" data-trades="{trades}">'
+            f'<td class="ticker">{esc(name)}</td>'
+            f'<td data-sort="{mk}">{_month_label(mk)}</td>'
+            f'<td class="num {_sign_class(pnl)}">{_signed_money(pnl)}</td>'
+            f'<td class="num">{trades}</td></tr>')
+    # Newest month first, tickers alphabetical within it, Unattributed last.
+    rows = [r for mk in months for r in rows if f'data-month="{mk}"' in r]
+
+    total = sum(v[0] for v in groups.values())
+    trades = sum(v[1] for v in groups.values())
+    opts = "".join(f'<option value="{mk}">{_month_label(mk)}</option>' for mk in months)
+    scope = "in this window" if m.window else "over these statements"
+    return f"""
+  <section class="card" id="ticker-month">
+    <h2>By ticker and month</h2>
+    <p class="sub-head">Net income per ticker for each month {scope}, and the number
+      of trades that closed in it. A trade counts in the month it <em>closed</em> &mdash;
+      buying realizes nothing, so a position opened in one month and sold in the next
+      belongs entirely to the second. Opening trades are not counted. Click a row for
+      that ticker's full history.</p>
+    <div class="controls in-card">
+      <label class="control"><span>Month</span>
+        <select id="f-month"><option value="">All months</option>{opts}</select></label>
+    </div>
+    <div class="table-scroll">
+    <table class="data sortable" id="tm-table">
+      <thead><tr>
+        <th data-dir="">Ticker</th><th data-dir="">Month</th>
+        <th class="num" data-dir="">Net P&amp;L</th>
+        <th class="num" data-dir="">Closed trades</th>
+      </tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+      <tfoot><tr class="subtotal">
+        <td>Total</td><td id="tm-total-label">All months</td>
+        <td class="num {_sign_class(total)}" id="tm-total">{_signed_money(total)}</td>
+        <td class="num" id="tm-trades">{trades}</td>
       </tr></tfoot>
     </table></div>
   </section>"""
@@ -1609,7 +1720,13 @@ def _legend_chips(include_other: bool) -> str:
 
 
 def _row_income(classified, positions, window=None) -> dict[tuple[str, int], float]:
-    """What each row contributed to net income, keyed by (source file, row index).
+    """What each row contributed to net income, keyed by (source file, row index)."""
+    return _row_ledger(classified, positions, window)[0]
+
+
+def _row_ledger(classified, positions, window=None
+                ) -> tuple[dict[tuple[str, int], float], set[tuple[str, int]]]:
+    """Each row's contribution to net income, plus the rows that closed a trade.
 
     Not the row's cash. For a lot-matched category only a *closing* row carries
     income, and it carries the realized P&L rather than the proceeds — a sale
@@ -1619,7 +1736,13 @@ def _row_income(classified, positions, window=None) -> dict[tuple[str, int], flo
 
     Events are paired to rows by walking both in the engine's own sort order
     and consuming them in turn, so two identical closes on one day pair with
-    the right rows rather than by a key that cannot tell them apart.
+    the right rows rather than by a key that cannot tell them apart. **An
+    opening row never consumes one** — the engine emits no event for it. Without
+    that, a same-day BTO, BTO, STC on one contract handed the STC's P&L to the
+    first BTO, because opens sort first and all three share the queue key.
+
+    The second value is the set of rows that consumed an event: one closed
+    trade each, which is exactly what `TradeStats` counts.
 
     Under a window, a row outside it contributes **nothing to this report**,
     whatever its category. Realized events are already filtered, so the trades
@@ -1632,6 +1755,7 @@ def _row_income(classified, positions, window=None) -> dict[tuple[str, int], flo
         pending.setdefault((e.activity_date, e.key, e.category), []).append(e.amount)
 
     out: dict[tuple[str, int], float] = {}
+    closed: set[tuple[str, int]] = set()
     ordered = sorted(classified, key=lambda c: (c.txn.activity_date, _phase(c),
                                                  c.txn.source_file, c.txn.row_index))
     for c in ordered:
@@ -1640,13 +1764,21 @@ def _row_income(classified, positions, window=None) -> dict[tuple[str, int], flo
             out[ident] = 0.0
             continue
         if c.category in LOT_MATCHED_CATEGORIES:
+            code = c.txn.trans_code.strip().upper()
+            if code in OPENING_CODES[c.category] and c.txn.quantity:
+                out[ident] = 0.0
+                continue
             queue = pending.get((c.txn.activity_date, _position_key(c), c.category))
-            out[ident] = queue.pop(0) if queue else 0.0
+            if queue:
+                out[ident] = queue.pop(0)
+                closed.add(ident)
+            else:
+                out[ident] = 0.0
         elif c.category in _INCOME_ROW_CATEGORIES:
             out[ident] = c.txn.amount
         else:
             out[ident] = 0.0
-    return out
+    return out, closed
 
 
 def _transactions_table(classified, positions, window=None) -> str:
@@ -1862,6 +1994,7 @@ def build_page(m: Metrics, positions: PositionsResult, classified: list,
   {_open_positions_section(m, positions)}
 
   {_by_ticker_section(m)}
+  {_ticker_month_section(m, positions, table_rows)}
   {_drill_dialog()}
   {_period_dialogs()}
   <script type="application/json" id="period-data">{period_payload}</script>

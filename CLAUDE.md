@@ -111,7 +111,7 @@ working directory, so it behaves the same whichever folder you invoke it from.
 ./rh-dashboard serve -i sample_data -o /tmp/serve    # same page, served, with upload
 ./rh-dashboard build --cost-basis fifo               # match a 1099-B instead of averaging
 ./rh-dashboard build --from 2026-07-01 --to 2026-07-31   # report one window
-uv run ./rh-dashboard selftest                       # 575 assertions across 15 groups
+uv run ./rh-dashboard selftest                       # 603 assertions across 15 groups
 ```
 
 `selftest.py` *is* the test suite — there is no pytest. It cannot run a subset
@@ -324,6 +324,16 @@ metrics asks `positions.py` for the realized figures.
    rows and marks which fall inside, because hiding the June purchase behind a
    July sale leaves the reader unable to check the number. Nothing that
    *counts* comes from those extra rows.
+   `_row_ledger` (which `_row_income` wraps) pairs realized events to rows by
+   a `(date, position key, category)` queue, and **an opening row must never
+   consume from it** — the engine emits no event for an open, and since opens
+   sort first, a same-day BTO, BTO, STC once handed the STC's P&L to the first
+   BTO. It also returns the set of rows that *did* consume an event: one closed
+   trade each, the same definition `TradeStats` uses. The **By ticker and
+   month** table (`_ticker_month_section`) is grouped from exactly that ledger
+   at build time, keyed on the *closing* row's month, so a ticker's months sum
+   to its By ticker figure and all months sum to net income — group 13 asserts
+   both. Its month filter only hides rows and re-totals the footer in JS.
    **`assets.py`** holds the only binary the page carries: the
    tab favicon, base64 PNG inline, because a linked icon file would be a
    network request and break that guarantee. Two places emit the `<head>` that
